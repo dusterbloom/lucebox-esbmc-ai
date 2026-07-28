@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import shutil
 import tarfile
 from pathlib import Path, PurePosixPath
@@ -12,6 +13,22 @@ MAX_BUNDLE_BYTES = 4_000_000
 
 class BundleError(ValueError):
     pass
+
+
+def sanitized_subprocess_environment() -> dict[str, str]:
+    """Return the process environment without credential-shaped variables."""
+    blocked_fragments = (
+        "API_KEY",
+        "CREDENTIAL",
+        "PASSWORD",
+        "SECRET",
+        "TOKEN",
+    )
+    return {
+        key: value
+        for key, value in os.environ.items()
+        if not any(fragment in key.upper() for fragment in blocked_fragments)
+    }
 
 
 def safe_repo_path(root: Path, value: str) -> Path:

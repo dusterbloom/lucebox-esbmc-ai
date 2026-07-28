@@ -4,17 +4,32 @@ import io
 import tarfile
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 from lucebox_formal.security import (
     BundleError,
     extract_bundle,
     safe_repo_path,
+    sanitized_subprocess_environment,
     validate_patch_paths,
 )
 
 
 class SecurityTests(unittest.TestCase):
+    def test_subprocess_environment_removes_credentials(self) -> None:
+        with patch.dict(
+            "os.environ",
+            {
+                "PATH": "/usr/bin",
+                "OPENAI_API_KEY": "secret",
+                "ACTIONS_RUNTIME_TOKEN": "secret",
+            },
+            clear=True,
+        ):
+            environment = sanitized_subprocess_environment()
+        self.assertEqual(environment, {"PATH": "/usr/bin"})
+
     def test_safe_repo_path_rejects_parent(self) -> None:
         with self.assertRaises(BundleError):
             safe_repo_path(Path("/workspace"), "../secret")

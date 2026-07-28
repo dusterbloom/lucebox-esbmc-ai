@@ -45,22 +45,29 @@ contract_paths = ["formal/harness.cpp"]
         )
         return manifest
 
+    def _fake_esbmc(self, root: Path, result: str, exit_code: int) -> Path:
+        fake = root / "fake-esbmc"
+        fake.write_text(
+            f"""#!/bin/sh
+if [ "$1" = "--version" ]; then
+  echo "ESBMC version 8.4.0"
+else
+  echo "{result}"
+  exit {exit_code}
+fi
+""",
+            encoding="utf-8",
+        )
+        fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
+        return fake
+
     def test_success_report_without_git_checkout(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             manifest = self._workspace(root)
-            fake = root / "fake-esbmc"
-            fake.write_text(
-                """#!/bin/sh
-if [ "$1" = "--version" ]; then
-  echo "ESBMC version 8.4.0"
-else
-  echo "VERIFICATION SUCCESSFUL"
-fi
-""",
-                encoding="utf-8",
+            fake = self._fake_esbmc(
+                root, "VERIFICATION SUCCESSFUL", 0
             )
-            fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
             output = root / "results"
             with patch.dict(os.environ, {"ESBMC_PATH": str(fake)}):
                 code = run_verify(manifest, "", "all", output)
@@ -73,6 +80,22 @@ fi
             self.assertEqual(report["results"][0]["status"], "passed")
             self.assertTrue((output / "junit.xml").is_file())
             self.assertTrue((output / "summary.md").is_file())
+
+    def test_only_counterexamples_create_repair_bundles(self) -> None:
+        for result, exit_code, expected_code, expected_bundle in (
+            ("VERIFICATION FAILED", 1, 10, True),
+            ("ERROR: Timed out", 1, 11, False),
+        ):
+            with self.subTest(result=result), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                manifest = self._workspace(root)
+                fake = self._fake_esbmc(root, result, exit_code)
+                output = root / "results"
+                with patch.dict(os.environ, {"ESBMC_PATH": str(fake)}):
+                    code = run_verify(manifest, "", "all", output)
+                bundles = list(output.glob("failure-bundle-*.tar.gz"))
+                self.assertEqual(code, expected_code)
+                self.assertEqual(bool(bundles), expected_bundle)
 
 
 if __name__ == "__main__":

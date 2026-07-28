@@ -11,6 +11,7 @@ from .security import (
     BundleError,
     extract_bundle,
     safe_repo_path,
+    sanitized_subprocess_environment,
     sha256_file,
     validate_patch_paths,
 )
@@ -122,6 +123,7 @@ def _run_native_test(workspace: Path, source: str | None) -> tuple[bool, str]:
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             timeout=120,
+            env=sanitized_subprocess_environment(),
         )
         if compile_process.returncode != 0:
             return False, "native compile failed:\n" + compile_process.stdout
@@ -133,6 +135,7 @@ def _run_native_test(workspace: Path, source: str | None) -> tuple[bool, str]:
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             timeout=120,
+            env=sanitized_subprocess_environment(),
         )
         return (
             test_process.returncode == 0,
@@ -213,6 +216,7 @@ def run_repair(
                 text=True,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
+                env=sanitized_subprocess_environment(),
             )
             if check.returncode != 0:
                 feedback = "git apply --check failed:\n" + check.stdout
@@ -231,6 +235,7 @@ def run_repair(
                 text=True,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
+                env=sanitized_subprocess_environment(),
             )
             if apply_process.returncode != 0:
                 feedback = "git apply failed:\n" + apply_process.stdout

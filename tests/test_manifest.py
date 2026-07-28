@@ -59,6 +59,16 @@ class ManifestTests(unittest.TestCase):
             with self.assertRaises(ManifestError):
                 load_manifest(path)
 
+    def test_rejects_capsule_id_path_traversal(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "manifest.toml"
+            path.write_text(
+                MANIFEST.replace('id = "state"', 'id = "../../escape"'),
+                encoding="utf-8",
+            )
+            with self.assertRaises(ManifestError):
+                load_manifest(path)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -12,7 +12,11 @@ from xml.etree import ElementTree
 
 from .manifest import capsule_matches, changed_paths, load_manifest
 from .model import Capsule, CapsuleResult, Manifest
-from .security import safe_repo_path, sha256_file
+from .security import (
+    safe_repo_path,
+    sanitized_subprocess_environment,
+    sha256_file,
+)
 
 
 MAX_CAPTURE_BYTES = 512_000
@@ -26,6 +30,7 @@ def _tool_version(esbmc: str) -> str:
             text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
+            env=sanitized_subprocess_environment(),
         )
     except OSError as exc:
         return f"unavailable ({exc})"
@@ -70,6 +75,7 @@ def verify_capsule(
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             timeout=capsule.timeout_seconds + 10,
+            env=sanitized_subprocess_environment(),
         )
         output = process.stdout.decode("utf-8", errors="replace")
         if "Timed out" in output or "timed out" in output:
@@ -237,12 +243,24 @@ def run_verify(
     output_dir.mkdir(parents=True, exist_ok=True)
     esbmc = os.environ.get("ESBMC_PATH", "esbmc")
     version = _tool_version(esbmc)
+    expected_version = manifest.toolchain["esbmc_version"]
+    version_matches = expected_version in version
     changed = changed_paths(root, base_sha) if mode == "pr" else ()
 
     results: list[CapsuleResult] = []
     for capsule in manifest.capsules:
         selected = mode in {"all", "nightly"} or capsule_matches(capsule, changed)
-        if selected:
+        if selected and not version_matches:
+            result = CapsuleResult(
+                id=capsule.id,
+                description=capsule.description,
+                status="tool_error",
+                duration_seconds=0.0,
+                output=(
+                    f"expected ESBMC {expected_version}, found {version}"
+                ),
+            )
+        elif selected:
             result = verify_capsule(esbmc, root, capsule, mode)
         else:
             result = CapsuleResult(
@@ -252,7 +270,7 @@ def run_verify(
                 duration_seconds=0.0,
             )
         results.append(result)
-        if result.status in {"counterexample", "timeout", "tool_error"}:
+        if result.status == "counterexample":
             _create_failure_bundle(
                 manifest, root, capsule, result, output_dir
             )
