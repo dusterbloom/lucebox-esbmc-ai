@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lucebox-esbmc-ai"
+version = "0.1.0"
+description = "Proof-carrying ESBMC and ESBMC-AI CI adapter for Lucebox"
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "AGPL-3.0-or-later" }
+authors = [{ name = "dusterbloom" }]
+dependencies = []
+
+[project.scripts]
+lucebox-formal = "lucebox_formal.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["lucebox_formal*"]
