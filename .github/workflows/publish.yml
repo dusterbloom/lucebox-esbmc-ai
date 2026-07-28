@@ -56,6 +56,20 @@ jobs:
             --entrypoint esbmc \
             "$IMAGE_REF" \
             /smoke.cpp --quiet --z3
+      - name: Smoke-test repair adapter argument isolation
+        if: matrix.target == 'repair'
+        env:
+          IMAGE_REF: ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}:sha-${{ github.sha }}
+        run: |
+          docker run --rm \
+            --network none \
+            --read-only \
+            --cap-drop ALL \
+            --security-opt no-new-privileges \
+            --tmpfs /tmp:rw,nosuid,nodev,size=128m \
+            --entrypoint python \
+            "$IMAGE_REF" \
+            -c 'import sys; sys.argv = ["lucebox-formal", "propose", "--bundle", "x"]; from lucebox_formal.repair import _esbmc_ai_model_class; _esbmc_ai_model_class(); print("repair adapter CLI: PASS")'
       - name: Record immutable image reference
         run: |
           mkdir -p digests

@@ -42,6 +42,19 @@ A unified diff rooted at the repository root.
 """
 
 
+def _esbmc_ai_model_class():
+    # ESBMC-AI's Config is a singleton whose default settings source parses
+    # sys.argv. This adapter already owns the CLI, so allowing the dependency
+    # to parse `lucebox-formal propose --bundle ...` rejects our arguments
+    # before any model request. Initialize its singleton explicitly with CLI
+    # parsing disabled before AIModel asks Config for request settings.
+    from esbmc_ai.config import Config as ESBMCAIConfig
+    from esbmc_ai.ai_models import AIModel
+
+    ESBMCAIConfig(_cli_parse_args=False)
+    return AIModel
+
+
 def _extract_patch(response: str) -> tuple[str, str]:
     marker = "```diff"
     start = response.find(marker)
@@ -175,8 +188,9 @@ def run_propose(bundle: Path, model: str, output_dir: Path) -> int:
 
     # These dependencies exist only in the repair image. This process performs
     # no compilation or verification while it holds a model credential.
-    from esbmc_ai.ai_models import AIModel
     from langchain_core.messages import HumanMessage, SystemMessage
+
+    AIModel = _esbmc_ai_model_class()
 
     with tempfile.TemporaryDirectory(prefix="lucebox-propose-") as temp:
         workspace = Path(temp) / "workspace"
