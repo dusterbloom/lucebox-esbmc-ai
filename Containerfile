@@ -25,7 +25,7 @@ LABEL org.opencontainers.image.source="https://github.com/dusterbloom/lucebox-es
 LABEL org.opencontainers.image.licenses="AGPL-3.0-or-later"
 RUN apt-get update \
     && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-        ca-certificates git python3-minimal python3-venv \
+        ca-certificates git libc6-dev python3-minimal python3-venv \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=esbmc-fetch /opt/esbmc/bin/esbmc /usr/local/bin/esbmc
 COPY --from=esbmc-fetch /opt/esbmc/license /usr/share/licenses/esbmc
