@@ -12,18 +12,21 @@ bounds recorded by that capsule. It does not claim whole-program correctness.
 - `verifier` contains ESBMC and this deterministic adapter. It has no LLM
   dependencies, receives the Lucebox checkout read-only, and runs without
   network access.
-- `repair` additionally contains ESBMC-AI. It receives only a size-limited
-  failure bundle, may edit only manifest-declared production files, and emits a
-  candidate patch only after the immutable formal contract and native test pass
-  again. It never pushes, comments, commits, or opens pull requests.
+- `repair` additionally contains ESBMC-AI and a compiler. The workflow invokes
+  it twice in separate ephemeral containers: `propose` has the model credential
+  but never executes candidate code; `validate` has no credential or network
+  and is the only process allowed to apply, compile, run, and reverify a patch.
+  It emits an accepted patch only after the immutable formal contract and native
+  test pass again.
 
-The repair lane is advisory. A human must inspect and apply any candidate.
+Neither process pushes, comments, commits, or opens pull requests. The repair
+lane is advisory; a human must inspect and apply any accepted candidate.
 
 ## Exit codes
 
 | Code | Meaning |
 |---:|---|
-| 0 | All selected capsules passed, or a repair candidate reverified |
+| 0 | Capsules passed, a proposal was produced, or a candidate reverified |
 | 10 | At least one ESBMC counterexample |
 | 11 | At least one capsule timed out |
 | 12 | ESBMC or its frontend failed |
@@ -46,14 +49,19 @@ publication.
 
 ## Repair input and secrets
 
-`lucebox-formal repair` accepts a verifier-generated `failure-bundle-*.tar.gz`.
+`lucebox-formal propose` accepts a verifier-generated
+`failure-bundle-*.tar.gz` and writes an untrusted proposal. In a new container,
+`lucebox-formal validate` accepts that bundle and patch and writes
+`candidate.patch` only on success.
+
 The GitHub workflow is designed for an environment named `formal-ai`; store
-`OPENAI_API_KEY` there and require reviewers before that environment may run.
-The model is configurable with `FORMAL_AI_MODEL`.
+`OPENAI_API_KEY` there and require reviewers before the proposer may run. The
+model is configurable with `FORMAL_AI_MODEL`.
 
 The workflow never runs on fork content with a secret. It is triggered only for
-same-repository failures, does not check out the failed revision, and validates
-every archive and patch path before use.
+same-repository counterexamples, does not check out the failed revision, and
+validates every archive and patch path before use. The validator runs with
+`--network none` after the credential-bearing proposer container has exited.
 
 ## Development
 

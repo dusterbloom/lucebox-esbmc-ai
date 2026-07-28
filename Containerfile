@@ -20,7 +20,7 @@ RUN curl --fail --location --retry 5 \
     && chmod 0755 /opt/esbmc/bin/esbmc \
     && rm /tmp/esbmc-linux.zip
 
-FROM ubuntu:${UBUNTU_VERSION} AS verifier
+FROM ubuntu:${UBUNTU_VERSION} AS runtime
 LABEL org.opencontainers.image.source="https://github.com/dusterbloom/lucebox-esbmc-ai"
 LABEL org.opencontainers.image.licenses="AGPL-3.0-or-later"
 RUN apt-get update \
@@ -29,14 +29,16 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=esbmc-fetch /opt/esbmc/bin/esbmc /usr/local/bin/esbmc
 COPY --from=esbmc-fetch /opt/esbmc/license /usr/share/licenses/esbmc
-COPY . /opt/lucebox-esbmc-ai-src
-RUN python3 -m venv /opt/venv \
-    && /opt/venv/bin/pip install --no-cache-dir /opt/lucebox-esbmc-ai-src \
-    && rm -rf /opt/lucebox-esbmc-ai-src
+RUN python3 -m venv /opt/venv
 ENV PATH="/opt/venv/bin:${PATH}"
 ENTRYPOINT ["lucebox-formal"]
 
-FROM verifier AS repair
+FROM runtime AS verifier
+COPY . /opt/lucebox-esbmc-ai-src
+RUN /opt/venv/bin/pip install --no-cache-dir /opt/lucebox-esbmc-ai-src \
+    && rm -rf /opt/lucebox-esbmc-ai-src
+
+FROM runtime AS repair-dependencies
 ARG ESBMC_AI_COMMIT=982f3ae0328e4b8906c3264b00e6541cd93356d8
 RUN apt-get update \
     && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
@@ -46,3 +48,8 @@ RUN apt-get update \
         torch --index-url https://download.pytorch.org/whl/cpu \
     && /opt/venv/bin/pip install --no-cache-dir \
         "git+https://github.com/esbmc/esbmc-ai.git@${ESBMC_AI_COMMIT}"
+
+FROM repair-dependencies AS repair
+COPY . /opt/lucebox-esbmc-ai-src
+RUN /opt/venv/bin/pip install --no-cache-dir /opt/lucebox-esbmc-ai-src \
+    && rm -rf /opt/lucebox-esbmc-ai-src

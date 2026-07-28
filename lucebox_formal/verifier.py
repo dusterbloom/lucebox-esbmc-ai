@@ -201,11 +201,15 @@ def _create_failure_bundle(
     output_dir: Path,
 ) -> Path:
     contract_hashes: dict[str, str] = {}
+    manifest_relative = str(manifest.path.relative_to(root))
     bundle_paths = set(capsule.mutable_paths) | set(capsule.contract_paths)
-    bundle_paths.add(str(manifest.path.relative_to(root)))
+    bundle_paths.add(manifest_relative)
     if capsule.native_test_source:
         bundle_paths.add(capsule.native_test_source)
-    for path in capsule.contract_paths:
+    immutable_paths = set(capsule.contract_paths) | {manifest_relative}
+    if capsule.native_test_source:
+        immutable_paths.add(capsule.native_test_source)
+    for path in immutable_paths:
         contract_hashes[path] = sha256_file(safe_repo_path(root, path))
 
     failure = {
@@ -237,6 +241,7 @@ def run_verify(
     base_sha: str,
     mode: str,
     output_dir: Path,
+    only_capsules: set[str] | None = None,
 ) -> int:
     manifest = load_manifest(manifest_path)
     root = manifest.path.parent.parent
@@ -249,7 +254,11 @@ def run_verify(
 
     results: list[CapsuleResult] = []
     for capsule in manifest.capsules:
-        selected = mode in {"all", "nightly"} or capsule_matches(capsule, changed)
+        selected_by_id = only_capsules is None or capsule.id in only_capsules
+        selected_by_scope = (
+            mode in {"all", "nightly"} or capsule_matches(capsule, changed)
+        )
+        selected = selected_by_id and selected_by_scope
         if selected and not version_matches:
             result = CapsuleResult(
                 id=capsule.id,

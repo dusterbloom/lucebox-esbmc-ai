@@ -5,7 +5,7 @@ import sys
 from pathlib import Path
 
 from .manifest import ManifestError
-from .repair import run_repair
+from .repair import run_propose, run_validate
 from .security import BundleError
 from .verifier import run_verify
 
@@ -22,11 +22,15 @@ def _parser() -> argparse.ArgumentParser:
     )
     verify.add_argument("--out", type=Path, required=True)
 
-    repair = subparsers.add_parser("repair")
-    repair.add_argument("--bundle", type=Path, required=True)
-    repair.add_argument("--model", default="openai:gpt-5.6-sol")
-    repair.add_argument("--max-attempts", type=int, default=3)
-    repair.add_argument("--out", type=Path, required=True)
+    propose = subparsers.add_parser("propose")
+    propose.add_argument("--bundle", type=Path, required=True)
+    propose.add_argument("--model", default="openai:gpt-5.6-sol")
+    propose.add_argument("--out", type=Path, required=True)
+
+    validate = subparsers.add_parser("validate")
+    validate.add_argument("--bundle", type=Path, required=True)
+    validate.add_argument("--patch", type=Path, required=True)
+    validate.add_argument("--out", type=Path, required=True)
     return parser
 
 
@@ -37,10 +41,10 @@ def main() -> None:
             code = run_verify(
                 args.manifest, args.base_sha, args.mode, args.out
             )
+        elif args.command == "propose":
+            code = run_propose(args.bundle, args.model, args.out)
         else:
-            code = run_repair(
-                args.bundle, args.model, args.max_attempts, args.out
-            )
+            code = run_validate(args.bundle, args.patch, args.out)
     except ManifestError as exc:
         print(f"manifest error: {exc}", file=sys.stderr)
         code = 13

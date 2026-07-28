@@ -18,12 +18,14 @@ from .security import (
 from .verifier import run_verify
 
 
+MAX_PATCH_BYTES = 256_000
+
 SYSTEM_PROMPT = """\
 You are repairing a bounded C++ verification failure in Lucebox.
 
 Hard constraints:
-- Treat the formal harness, property documents, assumptions, and manifest as
-  immutable specifications.
+- Treat the formal harness, property documents, assumptions, native tests, and
+  manifest as immutable specifications.
 - Modify only the explicitly mutable production files.
 - Preserve the intended external behavior; do not delete checks, weaken
   assertions, add assumptions, or special-case the bounded test constants.
@@ -50,21 +52,43 @@ def _extract_patch(response: str) -> tuple[str, str]:
     if body_start < 0 or end < 0:
         raise BundleError("model response contained an incomplete diff fence")
     patch = response[body_start + 1 : end].strip() + "\n"
+    if len(patch.encode("utf-8")) > MAX_PATCH_BYTES:
+        raise BundleError("candidate patch exceeds size limit")
     diagnosis = response[:start].strip()
     return diagnosis, patch
 
 
-def _prompt(failure: dict, workspace: Path, feedback: str) -> str:
+def _load_failure(bundle: Path, workspace: Path) -> dict:
+    extract_bundle(bundle, workspace)
+    failure_path = workspace / "failure.json"
+    if not failure_path.is_file():
+        raise BundleError("failure bundle is missing failure.json")
+    failure = json.loads(failure_path.read_text(encoding="utf-8"))
+    if failure.get("schema_version") != 1:
+        raise BundleError("unsupported failure bundle schema")
+
+    mutable_paths = failure.get("mutable_paths")
+    if not isinstance(mutable_paths, list) or not mutable_paths:
+        raise BundleError("failure bundle declares no mutable files")
+    if not all(isinstance(path, str) for path in mutable_paths):
+        raise BundleError("failure bundle has invalid mutable paths")
+    for relative in mutable_paths:
+        path = safe_repo_path(workspace, relative)
+        if not path.is_file():
+            raise BundleError(f"mutable file is missing: {relative}")
+    _validate_contracts(workspace, failure.get("contract_hashes", {}))
+    return failure
+
+
+def _prompt(failure: dict, workspace: Path) -> str:
     capsule = failure["capsule"]
-    mutable_paths = failure["mutable_paths"]
-    contracts = capsule["contract_paths"]
     sections = [
         "CAPSULE:",
         capsule["id"],
         "",
         "DECLARED PROPERTIES AND BOUNDS:",
     ]
-    for relative in contracts:
+    for relative in capsule["contract_paths"]:
         path = safe_repo_path(workspace, relative)
         sections.extend([f"--- {relative}", path.read_text(encoding="utf-8")])
     sections.extend(
@@ -76,7 +100,7 @@ def _prompt(failure: dict, workspace: Path, feedback: str) -> str:
             "MUTABLE PRODUCTION FILES:",
         ]
     )
-    for relative in mutable_paths:
+    for relative in failure["mutable_paths"]:
         path = safe_repo_path(workspace, relative)
         sections.extend(
             [
@@ -86,15 +110,17 @@ def _prompt(failure: dict, workspace: Path, feedback: str) -> str:
                 "```",
             ]
         )
-    if feedback:
-        sections.extend(["", "PREVIOUS CANDIDATE RESULT:", feedback])
     return "\n".join(sections)
 
 
 def _validate_contracts(
     workspace: Path, expected_hashes: dict[str, str]
 ) -> None:
+    if not isinstance(expected_hashes, dict) or not expected_hashes:
+        raise BundleError("failure bundle declares no immutable contracts")
     for relative, expected in expected_hashes.items():
+        if not isinstance(relative, str) or not isinstance(expected, str):
+            raise BundleError("failure bundle has invalid contract hashes")
         actual = sha256_file(safe_repo_path(workspace, relative))
         if actual != expected:
             raise BundleError(f"candidate modified immutable contract: {relative}")
@@ -143,190 +169,162 @@ def _run_native_test(workspace: Path, source: str | None) -> tuple[bool, str]:
         )
 
 
-def run_repair(
-    bundle: Path,
-    model: str,
-    max_attempts: int,
-    output_dir: Path,
-) -> int:
-    if max_attempts < 1 or max_attempts > 5:
-        raise ValueError("max_attempts must be between 1 and 5")
+def run_propose(bundle: Path, model: str, output_dir: Path) -> int:
+    """Ask the model for one bounded patch without executing candidate code."""
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Importing ESBMC-AI is intentionally limited to the repair image and
-    # repair subcommand. The deterministic verifier image has no LLM stack.
+    # These dependencies exist only in the repair image. This process performs
+    # no compilation or verification while it holds a model credential.
     from esbmc_ai.ai_models import AIModel
     from langchain_core.messages import HumanMessage, SystemMessage
 
-    with tempfile.TemporaryDirectory(prefix="lucebox-repair-") as temp:
-        pristine = Path(temp) / "pristine"
-        pristine.mkdir()
-        extract_bundle(bundle, pristine)
-        failure = json.loads(
-            (pristine / "failure.json").read_text(encoding="utf-8")
-        )
-        if failure.get("schema_version") != 1:
-            raise BundleError("unsupported failure bundle schema")
-
-        mutable_paths = set(failure.get("mutable_paths", []))
-        if not mutable_paths:
-            raise BundleError("failure bundle declares no mutable files")
-        for relative in mutable_paths:
-            safe_repo_path(pristine, relative)
-        _validate_contracts(pristine, failure["contract_hashes"])
+    with tempfile.TemporaryDirectory(prefix="lucebox-propose-") as temp:
+        workspace = Path(temp) / "workspace"
+        workspace.mkdir()
+        failure = _load_failure(bundle, workspace)
+        mutable_paths = set(failure["mutable_paths"])
 
         ai_model = AIModel.get_model(model=model, temperature=0)
-        history = [SystemMessage(content=SYSTEM_PROMPT)]
-        feedback = ""
-        attempts: list[dict] = []
-        final_patch = ""
-        final_diagnosis = ""
+        response = ai_model.invoke(
+            [
+                SystemMessage(content=SYSTEM_PROMPT),
+                HumanMessage(content=_prompt(failure, workspace)),
+            ]
+        )
+        response_text = response.text
+        if not isinstance(response_text, str):
+            response_text = str(response_text)
+        diagnosis, patch = _extract_patch(response_text)
+        validate_patch_paths(patch, mutable_paths)
 
-        for attempt_number in range(1, max_attempts + 1):
-            prompt = _prompt(failure, pristine, feedback)
-            history.append(HumanMessage(content=prompt))
-            response = ai_model.invoke(history)
-            history.append(response)
-            response_text = response.text
-            if not isinstance(response_text, str):
-                response_text = str(response_text)
-
-            try:
-                diagnosis, patch = _extract_patch(response_text)
-                validate_patch_paths(patch, mutable_paths)
-            except BundleError as exc:
-                feedback = str(exc)
-                attempts.append(
-                    {
-                        "attempt": attempt_number,
-                        "status": "invalid_patch",
-                        "detail": feedback,
-                    }
-                )
-                continue
-
-            attempt_root = Path(temp) / f"attempt-{attempt_number}"
-            shutil.copytree(pristine, attempt_root)
-            patch_path = attempt_root / "candidate.patch"
-            patch_path.write_text(patch, encoding="utf-8")
-            check = subprocess.run(
-                ["git", "apply", "--check", str(patch_path)],
-                cwd=attempt_root,
-                check=False,
-                text=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                env=sanitized_subprocess_environment(),
-            )
-            if check.returncode != 0:
-                feedback = "git apply --check failed:\n" + check.stdout
-                attempts.append(
-                    {
-                        "attempt": attempt_number,
-                        "status": "invalid_patch",
-                        "detail": feedback,
-                    }
-                )
-                continue
-            apply_process = subprocess.run(
-                ["git", "apply", str(patch_path)],
-                cwd=attempt_root,
-                check=False,
-                text=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                env=sanitized_subprocess_environment(),
-            )
-            if apply_process.returncode != 0:
-                feedback = "git apply failed:\n" + apply_process.stdout
-                attempts.append(
-                    {
-                        "attempt": attempt_number,
-                        "status": "invalid_patch",
-                        "detail": feedback,
-                    }
-                )
-                continue
-
-            try:
-                _validate_contracts(attempt_root, failure["contract_hashes"])
-            except BundleError as exc:
-                feedback = str(exc)
-                attempts.append(
-                    {
-                        "attempt": attempt_number,
-                        "status": "contract_modified",
-                        "detail": feedback,
-                    }
-                )
-                continue
-
-            verify_output = Path(temp) / f"verify-{attempt_number}"
-            manifest_path = attempt_root / "formal/manifest.toml"
-            verify_code = run_verify(
-                manifest_path, base_sha="", mode="all", output_dir=verify_output
-            )
-            manifest = load_manifest(manifest_path)
-            capsule_id = failure["capsule"]["id"]
-            capsule = next(
-                item for item in manifest.capsules if item.id == capsule_id
-            )
-            native_ok, native_output = _run_native_test(
-                attempt_root, capsule.native_test_source
-            )
-            if verify_code == 0 and native_ok:
-                attempts.append(
-                    {
-                        "attempt": attempt_number,
-                        "status": "reverified",
-                        "formal_exit_code": verify_code,
-                        "native_test": native_output,
-                    }
-                )
-                final_patch = patch
-                final_diagnosis = diagnosis
-                break
-
-            report_text = (verify_output / "report.json").read_text(
-                encoding="utf-8"
-            )
-            feedback = (
-                f"Formal exit code: {verify_code}\n{report_text}\n{native_output}"
-            )
-            attempts.append(
-                {
-                    "attempt": attempt_number,
-                    "status": "verification_failed",
-                    "formal_exit_code": verify_code,
-                    "native_test": native_output,
-                }
-            )
-
-        successful = bool(final_patch)
-        if successful:
-            (output_dir / "candidate.patch").write_text(
-                final_patch, encoding="utf-8"
-            )
-            (output_dir / "diagnosis.md").write_text(
-                final_diagnosis + "\n", encoding="utf-8"
-            )
-        else:
-            (output_dir / "diagnosis.md").write_text(
-                "No candidate passed the immutable formal contract.\n",
-                encoding="utf-8",
-            )
-        (output_dir / "repair-report.json").write_text(
+        (output_dir / "candidate.patch").write_text(
+            patch, encoding="utf-8"
+        )
+        (output_dir / "diagnosis.md").write_text(
+            diagnosis + "\n", encoding="utf-8"
+        )
+        (output_dir / "proposal-report.json").write_text(
             json.dumps(
                 {
                     "schema_version": 1,
                     "model": model,
-                    "successful": successful,
-                    "attempts": attempts,
                     "advisory_only": True,
+                    "executed_candidate_code": False,
                 },
                 indent=2,
                 sort_keys=True,
             ),
             encoding="utf-8",
         )
+    return 0
+
+
+def run_validate(bundle: Path, patch_path: Path, output_dir: Path) -> int:
+    """Apply and reverify a proposal in a secretless, networkless process."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+    patch = patch_path.read_text(encoding="utf-8")
+    if len(patch.encode("utf-8")) > MAX_PATCH_BYTES:
+        raise BundleError("candidate patch exceeds size limit")
+
+    with tempfile.TemporaryDirectory(prefix="lucebox-validate-") as temp:
+        workspace = Path(temp) / "workspace"
+        workspace.mkdir()
+        failure = _load_failure(bundle, workspace)
+        mutable_paths = set(failure["mutable_paths"])
+        validate_patch_paths(patch, mutable_paths)
+
+        local_patch = Path(temp) / "candidate.patch"
+        local_patch.write_text(patch, encoding="utf-8")
+        environment = sanitized_subprocess_environment()
+        check = subprocess.run(
+            ["git", "apply", "--check", str(local_patch)],
+            cwd=workspace,
+            check=False,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            timeout=30,
+            env=environment,
+        )
+        if check.returncode != 0:
+            detail = "git apply --check failed:\n" + check.stdout
+            _write_validation_report(output_dir, False, detail, None, "")
+            return 20
+        applied = subprocess.run(
+            ["git", "apply", str(local_patch)],
+            cwd=workspace,
+            check=False,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            timeout=30,
+            env=environment,
+        )
+        if applied.returncode != 0:
+            detail = "git apply failed:\n" + applied.stdout
+            _write_validation_report(output_dir, False, detail, None, "")
+            return 20
+
+        _validate_contracts(workspace, failure["contract_hashes"])
+        manifest_path = workspace / "formal/manifest.toml"
+        capsule_id = failure["capsule"]["id"]
+        verify_output = Path(temp) / "formal-results"
+        verify_code = run_verify(
+            manifest_path,
+            base_sha="",
+            mode="all",
+            output_dir=verify_output,
+            only_capsules={capsule_id},
+        )
+        manifest = load_manifest(manifest_path)
+        try:
+            capsule = next(
+                item for item in manifest.capsules if item.id == capsule_id
+            )
+        except StopIteration as exc:
+            raise BundleError(
+                f"manifest no longer contains capsule {capsule_id}"
+            ) from exc
+        native_ok, native_output = _run_native_test(
+            workspace, capsule.native_test_source
+        )
+        report = json.loads(
+            (verify_output / "report.json").read_text(encoding="utf-8")
+        )
+        successful = verify_code == 0 and native_ok
+        detail = (
+            "candidate passed the immutable formal and native contracts"
+            if successful
+            else "candidate did not pass revalidation"
+        )
+        _write_validation_report(
+            output_dir, successful, detail, report, native_output
+        )
+        if successful:
+            shutil.copyfile(patch_path, output_dir / "candidate.patch")
         return 0 if successful else 20
+
+
+def _write_validation_report(
+    output_dir: Path,
+    successful: bool,
+    detail: str,
+    formal_report: dict | None,
+    native_output: str,
+) -> None:
+    (output_dir / "validation-report.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "successful": successful,
+                "detail": detail,
+                "formal_report": formal_report,
+                "native_test": native_output,
+                "advisory_only": True,
+                "validator_received_model_credentials": False,
+            },
+            indent=2,
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
