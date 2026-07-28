@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import tarfile
 import tempfile
@@ -20,6 +21,8 @@ from .security import (
 
 
 MAX_CAPTURE_BYTES = 512_000
+MAX_HTML_REPORT_BYTES = 16_000_000
+MAX_HTML_REPORTS = 8
 
 
 def _tool_version(esbmc: str) -> str:
@@ -56,6 +59,8 @@ def _command(
     command.extend(f"-I{safe_repo_path(root, path)}" for path in capsule.include_dirs)
     command.extend(f"-D{define}" for define in defines)
     command.extend(capsule.esbmc_args)
+    if "--generate-html-report" not in capsule.esbmc_args:
+        command.append("--generate-html-report")
     return command
 
 
@@ -64,38 +69,72 @@ def verify_capsule(
     root: Path,
     capsule: Capsule,
     mode: str,
+    output_dir: Path,
 ) -> CapsuleResult:
     command = _command(esbmc, root, capsule, mode)
     started = time.monotonic()
-    try:
-        process = subprocess.run(
-            command,
-            cwd=root,
-            check=False,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            timeout=capsule.timeout_seconds + 10,
-            env=sanitized_subprocess_environment(),
-        )
-        output = process.stdout.decode("utf-8", errors="replace")
-        if "Timed out" in output or "timed out" in output:
+    artifacts: dict[str, list[str]] = {}
+    with tempfile.TemporaryDirectory(
+        prefix=f".{capsule.id}-", dir=output_dir
+    ) as report_temp:
+        report_workdir = Path(report_temp)
+        try:
+            process = subprocess.run(
+                command,
+                cwd=report_workdir,
+                check=False,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                timeout=capsule.timeout_seconds + 10,
+                env=sanitized_subprocess_environment(),
+            )
+            output = process.stdout.decode("utf-8", errors="replace")
+            if "Timed out" in output or "timed out" in output:
+                status = "timeout"
+            elif process.returncode == 0 and "VERIFICATION SUCCESSFUL" in output:
+                status = "passed"
+            elif "VERIFICATION FAILED" in output:
+                status = "counterexample"
+            else:
+                status = "tool_error"
+            return_code = process.returncode
+        except subprocess.TimeoutExpired as exc:
+            captured = exc.stdout or b""
+            output = captured.decode("utf-8", errors="replace")
             status = "timeout"
-        elif process.returncode == 0 and "VERIFICATION SUCCESSFUL" in output:
-            status = "passed"
-        elif "VERIFICATION FAILED" in output:
-            status = "counterexample"
-        else:
+            return_code = None
+        except OSError as exc:
+            output = str(exc)
             status = "tool_error"
-        return_code = process.returncode
-    except subprocess.TimeoutExpired as exc:
-        captured = exc.stdout or b""
-        output = captured.decode("utf-8", errors="replace")
-        status = "timeout"
-        return_code = None
-    except OSError as exc:
-        output = str(exc)
-        status = "tool_error"
-        return_code = None
+            return_code = None
+
+        html_reports = sorted(report_workdir.glob("report-*.html"))
+        if len(html_reports) > MAX_HTML_REPORTS:
+            output += (
+                "\n[lucebox-formal: omitted HTML reports beyond "
+                f"the limit of {MAX_HTML_REPORTS}]\n"
+            )
+            html_reports = html_reports[:MAX_HTML_REPORTS]
+        published_reports: list[str] = []
+        for report in html_reports:
+            if not report.is_file():
+                continue
+            if report.stat().st_size > MAX_HTML_REPORT_BYTES:
+                output += (
+                    "\n[lucebox-formal: omitted oversized HTML report "
+                    f"{report.name}]\n"
+                )
+                continue
+            destination = (
+                output_dir / "counterexamples" / capsule.id / report.name
+            )
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(report, destination)
+            published_reports.append(
+                destination.relative_to(output_dir).as_posix()
+            )
+        if published_reports:
+            artifacts["html_reports"] = published_reports
     duration = time.monotonic() - started
     if len(output.encode("utf-8")) > MAX_CAPTURE_BYTES:
         output = output.encode("utf-8")[:MAX_CAPTURE_BYTES].decode(
@@ -119,6 +158,7 @@ def verify_capsule(
             "esbmc_args": list(capsule.esbmc_args),
             "timeout_seconds": capsule.timeout_seconds,
         },
+        artifacts=artifacts,
     )
 
 
@@ -175,13 +215,23 @@ def _write_summary(
         f"- ESBMC: `{version}`",
         f"- Changed paths considered: `{len(changed)}`",
         "",
-        "| Capsule | Status | Duration |",
-        "|---|---:|---:|",
+        "| Capsule | Status | Duration | Artifacts |",
+        "|---|---:|---:|---|",
     ]
     for result in results:
+        artifact_paths = [
+            path
+            for paths in result.artifacts.values()
+            for path in paths
+        ]
+        artifacts = (
+            "<br>".join(f"`{path}`" for path in artifact_paths)
+            if artifact_paths
+            else "—"
+        )
         lines.append(
             f"| `{result.id}` | **{result.status}** | "
-            f"{result.duration_seconds:.2f}s |"
+            f"{result.duration_seconds:.2f}s | {artifacts} |"
         )
     lines.extend(
         [
@@ -270,7 +320,9 @@ def run_verify(
                 ),
             )
         elif selected:
-            result = verify_capsule(esbmc, root, capsule, mode)
+            result = verify_capsule(
+                esbmc, root, capsule, mode, output_dir
+            )
         else:
             result = CapsuleResult(
                 id=capsule.id,

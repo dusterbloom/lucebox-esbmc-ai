@@ -47,11 +47,17 @@ contract_paths = ["formal/harness.cpp"]
 
     def _fake_esbmc(self, root: Path, result: str, exit_code: int) -> Path:
         fake = root / "fake-esbmc"
+        report = (
+            "printf '%s\\n' '<html>counterexample</html>' > report-1.html"
+            if "VERIFICATION FAILED" in result
+            else ":"
+        )
         fake.write_text(
             f"""#!/bin/sh
 if [ "$1" = "--version" ]; then
   echo "ESBMC version 8.4.0"
 else
+  {report}
   echo "{result}"
   exit {exit_code}
 fi
@@ -78,6 +84,11 @@ fi
             )
             self.assertEqual(report["head_sha"], "isolated-bundle")
             self.assertEqual(report["results"][0]["status"], "passed")
+            self.assertIn(
+                "--generate-html-report",
+                report["results"][0]["command"],
+            )
+            self.assertEqual(report["results"][0]["artifacts"], {})
             self.assertTrue((output / "junit.xml").is_file())
             self.assertTrue((output / "summary.md").is_file())
 
@@ -96,6 +107,27 @@ fi
                 bundles = list(output.glob("failure-bundle-*.tar.gz"))
                 self.assertEqual(code, expected_code)
                 self.assertEqual(bool(bundles), expected_bundle)
+                html_report = (
+                    output
+                    / "counterexamples/state/report-1.html"
+                )
+                self.assertEqual(html_report.is_file(), expected_bundle)
+                report = json.loads(
+                    (output / "report.json").read_text(encoding="utf-8")
+                )
+                expected_artifacts = (
+                    {
+                        "html_reports": [
+                            "counterexamples/state/report-1.html"
+                        ]
+                    }
+                    if expected_bundle
+                    else {}
+                )
+                self.assertEqual(
+                    report["results"][0]["artifacts"],
+                    expected_artifacts,
+                )
 
 
 if __name__ == "__main__":

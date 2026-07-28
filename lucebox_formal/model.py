@@ -41,6 +41,7 @@ class CapsuleResult:
     output: str = ""
     return_code: int | None = None
     assumptions: dict[str, Any] = field(default_factory=dict)
+    artifacts: dict[str, list[str]] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

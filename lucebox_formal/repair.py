@@ -305,6 +305,13 @@ def run_validate(bundle: Path, patch_path: Path, output_dir: Path) -> int:
         report = json.loads(
             (verify_output / "report.json").read_text(encoding="utf-8")
         )
+        counterexamples = verify_output / "counterexamples"
+        if counterexamples.is_dir():
+            shutil.copytree(
+                counterexamples,
+                output_dir / "counterexamples",
+                dirs_exist_ok=True,
+            )
         successful = verify_code == 0 and native_ok
         detail = (
             "candidate passed the immutable formal and native contracts"

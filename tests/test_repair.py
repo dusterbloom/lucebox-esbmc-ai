@@ -57,6 +57,7 @@ if [ "$1" = "--version" ]; then
 elif [ "$FAKE_RESULT" = "success" ]; then
   echo "VERIFICATION SUCCESSFUL"
 else
+  printf '%s\n' '<html>counterexample</html>' > report-1.html
   echo "VERIFICATION FAILED"
   exit 1
 fi
@@ -117,6 +118,24 @@ diff --git a/server/src/state.h b/server/src/state.h
                 report["validator_received_model_credentials"]
             )
             self.assertTrue((accepted / "candidate.patch").is_file())
+
+            rejected = root / "rejected"
+            with patch.dict(
+                os.environ,
+                {
+                    "ESBMC_PATH": str(fake),
+                    "FAKE_RESULT": "failure",
+                },
+            ):
+                self.assertEqual(
+                    run_validate(bundle, candidate, rejected), 20
+                )
+            self.assertTrue(
+                (
+                    rejected
+                    / "counterexamples/state/report-1.html"
+                ).is_file()
+            )
 
 
 class RepairDependencyTests(unittest.TestCase):

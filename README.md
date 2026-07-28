@@ -45,14 +45,19 @@ lucebox-formal verify \
 
 The Lucebox repository wraps the container invocation in `scripts/formal.sh`.
 Image references live in `formal/manifest.toml` and are pinned by digest after
-publication.
+publication. Every selected C/C++ capsule asks ESBMC for its native,
+self-contained HTML report. Counterexamples publish those reports below
+`counterexamples/<capsule>/` alongside the JSON, JUnit, Markdown, and immutable
+repair-bundle artifacts.
 
 ## Repair input and secrets
 
 `lucebox-formal propose` accepts a verifier-generated
 `failure-bundle-*.tar.gz` and writes an untrusted proposal. In a new container,
 `lucebox-formal validate` accepts that bundle and patch and writes
-`candidate.patch` only on success.
+`candidate.patch` only on success. When a candidate still violates the formal
+contract, validation preserves the native HTML counterexample below its own
+`counterexamples/` output directory.
 
 The GitHub workflow is designed for an environment named `formal-ai`; store
 `OPENAI_API_KEY` there and require reviewers before the proposer may run. The
