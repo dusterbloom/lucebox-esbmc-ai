@@ -251,7 +251,7 @@ def run_validate(bundle: Path, patch_path: Path, output_dir: Path) -> int:
         local_patch.write_text(patch, encoding="utf-8")
         environment = sanitized_subprocess_environment()
         check = subprocess.run(
-            ["git", "apply", "--check", str(local_patch)],
+            ["git", "apply", "--recount", "--check", str(local_patch)],
             cwd=workspace,
             check=False,
             text=True,
@@ -265,7 +265,7 @@ def run_validate(bundle: Path, patch_path: Path, output_dir: Path) -> int:
             _write_validation_report(output_dir, False, detail, None, "")
             return 20
         applied = subprocess.run(
-            ["git", "apply", str(local_patch)],
+            ["git", "apply", "--recount", str(local_patch)],
             cwd=workspace,
             check=False,
             text=True,

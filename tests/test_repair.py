@@ -81,13 +81,15 @@ fi
                 "formal/manifest.toml", failure["contract_hashes"]
             )
 
+            # Deliberately incorrect hunk counts exercise the validator's
+            # safe recounting of model-generated unified diffs.
             candidate = root / "candidate.patch"
             candidate.write_text(
                 """\
 diff --git a/server/src/state.h b/server/src/state.h
 --- a/server/src/state.h
 +++ b/server/src/state.h
-@@ -1 +1,2 @@
+@@ -1,9 +1,10 @@
  #pragma once
 +// validated candidate
 """,
