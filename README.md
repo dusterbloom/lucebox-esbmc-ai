@@ -7,6 +7,10 @@ The integration makes one narrow promise: production code at an exact PR
 revision satisfies the bounded contracts approved at the exact target-branch
 revision recorded in the plan. It does not claim whole-program correctness.
 
+The proposed Lucebox coverage portfolio, exact contract properties, rollout
+order, and non-goals are recorded in
+[`docs/lucebox-contract-portfolio.md`](docs/lucebox-contract-portfolio.md).
+
 ## Trust lanes
 
 - `plan` reads the registry and templates from an exact base Git commit,
