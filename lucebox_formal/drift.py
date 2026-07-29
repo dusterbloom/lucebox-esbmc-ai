@@ -5,6 +5,7 @@ from __future__ import annotations
 import fnmatch
 import hashlib
 import re
+import tomllib
 from dataclasses import dataclass
 from pathlib import PurePosixPath
 from typing import Callable
@@ -255,6 +256,13 @@ def _policy_delta(
     if head is None:
         return delta, findings
 
+    if (
+        base.compatibility_manifest is not None
+        and base.compatibility_manifest != head.compatibility_manifest
+    ):
+        delta["weakened_targets"].append("registry:compatibility_manifest")
+    if base.toolchain != head.toolchain:
+        delta["weakened_targets"].append("registry:toolchain")
     head_areas = {area.id: area for area in head.critical_paths}
     for area in base.critical_paths:
         proposed = head_areas.get(area.id)
@@ -263,6 +271,18 @@ def _policy_delta(
             continue
         removed = sorted(set(area.paths) - set(proposed.paths))
         delta["removed_boundaries"].extend(f"{area.id}:{path}" for path in removed)
+        removed_watch_paths = sorted(set(area.watch_paths) - set(proposed.watch_paths))
+        delta["removed_boundaries"].extend(
+            f"{area.id}:watch:{path}" for path in removed_watch_paths
+        )
+        removed_include_roots = sorted(
+            set(area.include_roots) - set(proposed.include_roots)
+        )
+        delta["removed_boundaries"].extend(
+            f"{area.id}:include-root:{path}" for path in removed_include_roots
+        )
+        if area.policy == "required" and proposed.policy != "required":
+            delta["removed_boundaries"].append(f"{area.id}:policy")
 
     head_targets = {target.id: target for target in head.targets}
     for target in base.targets:
@@ -286,10 +306,75 @@ def _policy_delta(
                 "severity": "blocking",
                 "paths": [base.path],
                 "areas": list(delta["removed_areas"]),
-                "reason": "proposed policy removes a protected area, boundary, or target",
+                "reason": (
+                    "proposed policy changes or removes a protected "
+                    "area, boundary, toolchain, or target"
+                ),
             }
         )
     return delta, findings
+
+
+def _toolchain_consistency(
+    base_sha: str,
+    head_sha: str,
+    registry: ContractRegistry,
+    head_registry: ContractRegistry | None,
+    read_text: RevisionText,
+) -> tuple[dict[str, str | None], list[dict[str, object]]]:
+    path = registry.compatibility_manifest
+    result: dict[str, str | None] = {
+        "manifest_path": path,
+        "base": "not_configured",
+        "head": "not_configured",
+    }
+    if path is None:
+        return result, []
+
+    findings: list[dict[str, object]] = []
+    inconsistent: list[str] = []
+    expected_by_side = {
+        "base": registry.toolchain,
+        "head": (
+            head_registry.toolchain
+            if head_registry is not None
+            else registry.toolchain
+        ),
+    }
+    for side, revision in (("base", base_sha), ("head", head_sha)):
+        source = read_text(revision, path)
+        if source is None:
+            status = "missing"
+        else:
+            try:
+                manifest = tomllib.loads(source)
+            except tomllib.TOMLDecodeError:
+                status = "invalid"
+            else:
+                toolchain = manifest.get("toolchain")
+                status = (
+                    "match"
+                    if isinstance(toolchain, dict)
+                    and toolchain == expected_by_side[side]
+                    else "mismatch"
+                )
+        result[side] = status
+        if status != "match":
+            inconsistent.append(f"{side}={status}")
+    if inconsistent:
+        findings.append(
+            {
+                "kind": "toolchain_mismatch",
+                "severity": "blocking",
+                "paths": [path],
+                "areas": [],
+                "reason": (
+                    "compatibility manifest disagrees with protected registry: "
+                    + ", ".join(inconsistent)
+                ),
+            }
+        )
+    return result, findings
 
 
 def _finding_id(kind: str, paths: list[str]) -> str:
@@ -353,13 +438,20 @@ def analyze_drift(
         changes = ()
 
     closures: dict[tuple[str, str], frozenset[str]] = {}
-    for area in registry.critical_paths:
-        closures[(area.id, "base")] = include_closure(base_sha, area, cached_text)
-        closures[(area.id, "head")] = include_closure(head_sha, area, cached_text)
+    if changes:
+        for area in registry.critical_paths:
+            closures[(area.id, "base")] = include_closure(
+                base_sha, area, cached_text
+            )
+            closures[(area.id, "head")] = include_closure(
+                head_sha, area, cached_text
+            )
 
     rendered_changes: list[dict[str, object]] = []
     findings: list[dict[str, object]] = []
     policy_paths = {registry.path}
+    if registry.compatibility_manifest is not None:
+        policy_paths.add(registry.compatibility_manifest)
     for target in registry.targets:
         policy_paths.add(target.template)
         policy_paths.update(target.contract_paths)
@@ -441,6 +533,14 @@ def analyze_drift(
         registry, head_registry, head_registry_error
     )
     findings.extend(policy_findings)
+    toolchain_consistency, toolchain_findings = _toolchain_consistency(
+        base_sha,
+        head_sha,
+        registry,
+        head_registry,
+        cached_text,
+    )
+    findings.extend(toolchain_findings)
 
     submodule_paths = sorted(
         set(_submodule_paths(base_sha, cached_text))
@@ -483,6 +583,7 @@ def analyze_drift(
         "changes": rendered_changes,
         "findings": findings,
         "policy_delta": policy_delta,
+        "toolchain_consistency": toolchain_consistency,
     }
 
 
@@ -677,3 +778,32 @@ def validate_drift_report(
             or values != sorted(set(values))
         ):
             raise DriftError(f"drift policy_delta.{field} is invalid")
+
+    consistency = report.get("toolchain_consistency")
+    if not isinstance(consistency, dict) or set(consistency) != {
+        "manifest_path",
+        "base",
+        "head",
+    }:
+        raise DriftError("drift toolchain_consistency has invalid fields")
+    manifest_path = consistency.get("manifest_path")
+    if manifest_path is not None:
+        if not isinstance(manifest_path, str):
+            raise DriftError("drift compatibility manifest path is invalid")
+        _repo_path(manifest_path, "drift compatibility manifest path")
+    allowed_consistency = {
+        "not_configured",
+        "match",
+        "missing",
+        "invalid",
+        "mismatch",
+    }
+    if consistency.get("base") not in allowed_consistency or consistency.get(
+        "head"
+    ) not in allowed_consistency:
+        raise DriftError("drift toolchain consistency status is invalid")
+    if manifest_path is None and (
+        consistency.get("base") != "not_configured"
+        or consistency.get("head") != "not_configured"
+    ):
+        raise DriftError("unconfigured drift toolchain consistency is invalid")

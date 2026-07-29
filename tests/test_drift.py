@@ -20,6 +20,16 @@ class DriftTests(unittest.TestCase):
         with self.assertRaisesRegex(DriftError, "truncated"):
             parse_name_status("R100\0old.h\0")
 
+    def test_parses_copy_similarity_and_both_paths(self) -> None:
+        changes = parse_name_status("C091\0source.cpp\0copy.cpp\0")
+        self.assertEqual(len(changes), 1)
+        self.assertEqual(changes[0].status, "copied")
+        self.assertEqual(changes[0].score, 91)
+        self.assertEqual(
+            changed_paths(changes),
+            ("source.cpp", "copy.cpp"),
+        )
+
     def test_rejects_parent_traversal_path(self) -> None:
         with self.assertRaisesRegex(DriftError, "inside the repository"):
             parse_name_status("A\0../outside.h\0")

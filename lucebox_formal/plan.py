@@ -90,6 +90,15 @@ def load_registry(path: str, contents: str) -> ContractRegistry:
         raise PlanError(f"invalid base policy TOML: {exc}") from exc
     if data.get("schema_version") != 1:
         raise PlanError("unsupported registry schema_version")
+    registry_metadata = data.get("registry", {})
+    if not isinstance(registry_metadata, dict):
+        raise PlanError("registry must be a table")
+    compatibility_manifest = registry_metadata.get("compatibility_manifest")
+    if compatibility_manifest is not None:
+        compatibility_manifest = _repo_path(
+            compatibility_manifest,
+            "registry.compatibility_manifest",
+        )
     toolchain = data.get("toolchain", {})
     if not isinstance(toolchain, dict):
         raise PlanError("toolchain must be a table")
@@ -200,6 +209,7 @@ def load_registry(path: str, contents: str) -> ContractRegistry:
         path=_repo_path(path, "base_policy"),
         schema_version=1,
         toolchain=dict(toolchain),
+        compatibility_manifest=compatibility_manifest,
         critical_paths=tuple(critical_paths),
         targets=tuple(targets),
     )

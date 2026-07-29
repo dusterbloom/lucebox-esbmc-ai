@@ -18,6 +18,9 @@ from lucebox_formal.verifier import run_verify_plan
 REGISTRY = """\
 schema_version = 1
 
+[registry]
+compatibility_manifest = "formal/manifest.toml"
+
 [toolchain]
 esbmc_version = "8.4"
 
@@ -67,6 +70,10 @@ class PlanVerifierTests(unittest.TestCase):
         (root / "server/src").mkdir(parents=True)
         (root / "server/test").mkdir(parents=True)
         (root / "formal/contracts/registry.toml").write_text(REGISTRY, encoding="utf-8")
+        (root / "formal/manifest.toml").write_text(
+            'schema_version = 1\n\n[toolchain]\nesbmc_version = "8.4"\n',
+            encoding="utf-8",
+        )
         (root / "formal/contracts/state.cpp.in").write_text(
             "int verify_state() { return 0; }\n", encoding="utf-8"
         )

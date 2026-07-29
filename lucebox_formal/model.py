@@ -74,6 +74,7 @@ class ContractRegistry:
     path: str
     schema_version: int
     toolchain: dict[str, Any]
+    compatibility_manifest: str | None
     critical_paths: tuple[CriticalArea, ...]
     targets: tuple[RegistryTarget, ...]
 

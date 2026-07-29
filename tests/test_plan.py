@@ -16,6 +16,9 @@ from lucebox_formal.plan import (
 REGISTRY = """\
 schema_version = 1
 
+[registry]
+compatibility_manifest = "formal/manifest.toml"
+
 [toolchain]
 esbmc_version = "8.4"
 
@@ -83,6 +86,10 @@ class PlanTests(unittest.TestCase):
         (root / "server/src/server").mkdir(parents=True)
         (root / "server/test").mkdir(parents=True)
         (root / "formal/contracts/properties.md").write_text("properties\n", encoding="utf-8")
+        (root / "formal/manifest.toml").write_text(
+            'schema_version = 1\n\n[toolchain]\nesbmc_version = "8.4"\n',
+            encoding="utf-8",
+        )
         (root / "formal/contracts/registry.toml").write_text(REGISTRY, encoding="utf-8")
         (root / "formal/contracts/templates/slot-selector.cpp.in").write_text(
             TEMPLATE, encoding="utf-8"
@@ -265,6 +272,25 @@ class PlanTests(unittest.TestCase):
             )
             self.assertEqual(finding["severity"], "blocking")
 
+    def test_protected_boundary_deletion_is_blocking(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            base = self._workspace(root)
+            (root / "server/src/server/prefix_cache_state.h").unlink()
+            self._run(root, "add", "-u")
+            self._run(root, "commit", "-qm", "delete protected boundary")
+            head = self._run(root, "rev-parse", "HEAD")
+            output = root / "out"
+            run_plan(root, "formal/contracts/registry.toml", base, head, "pr", output)
+            report = json.loads((output / "plan.json").read_text(encoding="utf-8"))
+            self.assertTrue(
+                any(
+                    finding["kind"] == "boundary_deleted"
+                    and finding["severity"] == "blocking"
+                    for finding in report["drift"]["findings"]
+                )
+            )
+
     def test_policy_shrink_is_blocking_but_old_target_is_still_planned(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -345,6 +371,94 @@ class PlanTests(unittest.TestCase):
             self.assertTrue(
                 any(
                     finding["kind"] == "dependency_changed"
+                    for finding in report["drift"]["findings"]
+                )
+            )
+
+    def test_manifest_toolchain_mismatch_is_blocking(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            base = self._workspace(root)
+            head = self._commit_change(
+                root,
+                "formal/manifest.toml",
+                'schema_version = 1\n\n[toolchain]\nesbmc_version = "9.0"\n',
+            )
+            output = root / "out"
+            run_plan(root, "formal/contracts/registry.toml", base, head, "pr", output)
+            report = json.loads((output / "plan.json").read_text(encoding="utf-8"))
+            self.assertEqual(
+                report["drift"]["toolchain_consistency"],
+                {
+                    "manifest_path": "formal/manifest.toml",
+                    "base": "match",
+                    "head": "mismatch",
+                },
+            )
+            self.assertTrue(
+                any(
+                    finding["kind"] == "toolchain_mismatch"
+                    and finding["severity"] == "blocking"
+                    for finding in report["drift"]["findings"]
+                )
+            )
+
+    def test_coordinated_toolchain_change_is_still_protected_policy(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            base = self._workspace(root)
+            (root / "formal/contracts/registry.toml").write_text(
+                REGISTRY.replace('esbmc_version = "8.4"', 'esbmc_version = "9.0"'),
+                encoding="utf-8",
+            )
+            (root / "formal/manifest.toml").write_text(
+                'schema_version = 1\n\n[toolchain]\nesbmc_version = "9.0"\n',
+                encoding="utf-8",
+            )
+            self._run(root, "add", "formal")
+            self._run(root, "commit", "-qm", "propose coordinated toolchain change")
+            head = self._run(root, "rev-parse", "HEAD")
+            output = root / "out"
+            run_plan(root, "formal/contracts/registry.toml", base, head, "pr", output)
+            report = json.loads((output / "plan.json").read_text(encoding="utf-8"))
+            self.assertEqual(
+                report["drift"]["toolchain_consistency"],
+                {
+                    "manifest_path": "formal/manifest.toml",
+                    "base": "match",
+                    "head": "match",
+                },
+            )
+            self.assertIn(
+                "registry:toolchain",
+                report["drift"]["policy_delta"]["weakened_targets"],
+            )
+            self.assertTrue(
+                any(
+                    finding["kind"] == "policy_shrunk"
+                    and finding["severity"] == "blocking"
+                    for finding in report["drift"]["findings"]
+                )
+            )
+
+    def test_invalid_head_registry_is_blocking_without_replacing_base_policy(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            base = self._workspace(root)
+            head = self._commit_change(
+                root,
+                "formal/contracts/registry.toml",
+                "not valid toml = [",
+            )
+            output = root / "out"
+            run_plan(root, "formal/contracts/registry.toml", base, head, "pr", output)
+            report = json.loads((output / "plan.json").read_text(encoding="utf-8"))
+            self.assertEqual(report["items"][0]["id"], "slot-selector")
+            self.assertEqual(report["items"][0]["status"], "planned")
+            self.assertTrue(
+                any(
+                    finding["kind"] == "head_policy_invalid"
+                    and finding["severity"] == "blocking"
                     for finding in report["drift"]["findings"]
                 )
             )
