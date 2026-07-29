@@ -7,6 +7,11 @@ It is a portfolio, not a claim that every target below is implemented today.
 The protected Luce registry remains the authoritative source for promoted
 contracts and their exact bounds.
 
+The companion
+[`drift-sentinel design`](drift-sentinel-design.md) defines how this portfolio,
+the protected registry, the verifier toolchain, and a fast-moving upstream
+Lucebox revision remain synchronized without overstating path-level coverage.
+
 ## The promise
 
 For a pull request that changes a reviewed critical core, CI should select the

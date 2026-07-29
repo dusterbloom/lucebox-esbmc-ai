@@ -10,6 +10,8 @@ revision recorded in the plan. It does not claim whole-program correctness.
 The proposed Lucebox coverage portfolio, exact contract properties, rollout
 order, and non-goals are recorded in
 [`docs/lucebox-contract-portfolio.md`](docs/lucebox-contract-portfolio.md).
+The synchronization and drift-control design is recorded in
+[`docs/drift-sentinel-design.md`](docs/drift-sentinel-design.md).
 
 ## Trust lanes
 
