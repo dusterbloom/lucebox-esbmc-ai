@@ -284,6 +284,11 @@ class PlanTests(unittest.TestCase):
             self.assertEqual(report["items"][0]["status"], "planned")
             self.assertEqual(report["items"][0]["id"], "slot-selector")
             self.assertTrue(report["contract_changes"])
+            registry_relation = report["drift"]["changes"][0]["paths"][0]
+            self.assertEqual(
+                registry_relation["relations"],
+                ["policy_change", "target_trigger"],
+            )
             self.assertEqual(
                 report["drift"]["policy_delta"]["removed_boundaries"],
                 ["server-state:server/src/server/prefix_cache_state.h"],

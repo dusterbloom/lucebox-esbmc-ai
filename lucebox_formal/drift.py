@@ -359,6 +359,10 @@ def analyze_drift(
 
     rendered_changes: list[dict[str, object]] = []
     findings: list[dict[str, object]] = []
+    policy_paths = {registry.path}
+    for target in registry.targets:
+        policy_paths.add(target.template)
+        policy_paths.update(target.contract_paths)
     for change in changes:
         path_relations: list[dict[str, object]] = []
         for path, side in change.paths():
@@ -380,6 +384,8 @@ def analyze_drift(
             selected = sorted(
                 target.id for target in registry.targets if matches(path, target.trigger_paths)
             )
+            if path in policy_paths:
+                relations.append("policy_change")
             if selected:
                 relations.append("target_trigger")
             if not relations:
@@ -560,6 +566,7 @@ def validate_drift_report(
         "declared_boundary",
         "target_trigger",
         "include_adjacent",
+        "policy_change",
         "watch_match",
         "unmodeled",
     }
