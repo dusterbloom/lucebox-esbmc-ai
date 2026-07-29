@@ -58,11 +58,23 @@ class RegistryTarget:
 
 
 @dataclass(frozen=True)
+class CriticalArea:
+    """A human-approved formal-risk boundary and its advisory routing metadata."""
+
+    id: str
+    description: str
+    paths: tuple[str, ...]
+    watch_paths: tuple[str, ...] = ()
+    include_roots: tuple[str, ...] = ()
+    policy: str = "advisory"
+
+
+@dataclass(frozen=True)
 class ContractRegistry:
     path: str
     schema_version: int
     toolchain: dict[str, Any]
-    critical_paths: tuple[dict[str, Any], ...]
+    critical_paths: tuple[CriticalArea, ...]
     targets: tuple[RegistryTarget, ...]
 
 

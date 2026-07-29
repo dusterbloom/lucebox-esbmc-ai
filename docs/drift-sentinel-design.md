@@ -3,6 +3,16 @@
 Status: proposed implementation design for the `dusterbloom/lucebox-hub`
 pilot, 2026-07-29.
 
+Implementation status: the minimum PR-level slice is implemented on the
+companion `agent/per-pr-contract-plans` branch. It includes the shared bounded
+classifier, normalized Git change inventory, include adjacency, submodule
+coordinates, policy-shrink detection, planner embedding, verifier
+recomputation, structural blocking, and adversarial tests. Build/link
+adjacency, a standalone nightly audit, workflow-wide image-lock comparison,
+and synthetic upstream-merge automation remain follow-up work. CI adoption
+requires publishing the companion `0.3.0` images and accepting their immutable
+digests in Lucebox policy.
+
 This document defines how the formal-verification integration should remain
 honest and useful while Lucebox and its upstream dependencies change quickly.
 It incorporates an adversarial review performed with

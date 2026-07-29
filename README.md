@@ -16,12 +16,14 @@ The synchronization and drift-control design is recorded in
 ## Trust lanes
 
 - `plan` reads the registry and templates from an exact base Git commit,
-  selects targets from changed paths, and renders deterministic C++ harnesses.
+  inventories add/modify/delete/rename/copy and submodule changes, classifies
+  protected-boundary and bounded include adjacency, selects targets, and
+  renders deterministic C++ harnesses.
 - `verify` authenticates the plan, base policy, templates, contract snapshots,
-  generated harnesses, and head checkout before invoking ESBMC without network
-  access or credentials. When a target declares a native regression, it
-  compiles the immutable base snapshot against the exact head sources and runs
-  it inside the same constrained container.
+  drift evidence, generated harnesses, and head checkout before invoking ESBMC
+  without network access or credentials. When a target declares a native
+  regression, it compiles the immutable base snapshot against the exact head
+  sources and runs it inside the same constrained container.
 - `propose` and `validate` form the advisory repair lane. The credential-bearing
   proposer never executes candidate code; a second secretless container applies
   and reverifies it against the exact immutable failure bundle.
@@ -65,6 +67,13 @@ and bounded evidence bundles. Its machine conclusions are `verified`,
 reported as verified. A declared base-approved native regression is part of
 the deterministic result: compilation failure is inconclusive and a failing
 regression is a counterexample.
+
+Generated plans also contain a bounded `drift` record with the exact merge
+base, normalized Git change inventory, submodule pointers, structural
+relations, and proposed-policy delta. The verifier recomputes that record on a
+Git checkout. Removing or renaming a protected boundary, weakening protected
+policy, or supplying malformed/tampered drift evidence fails as
+`invalid_contract`; watch and include-adjacency gaps remain advisory.
 
 ## Advisory AI configuration
 

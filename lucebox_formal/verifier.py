@@ -14,8 +14,16 @@ from dataclasses import asdict
 from pathlib import Path, PurePosixPath
 from xml.etree import ElementTree
 
+from .drift import (
+    MAX_REVISION_TEXT_BYTES,
+    DriftError,
+    analyze_drift,
+    blocking_findings,
+    validate_drift_report,
+)
 from .manifest import ManifestError, capsule_matches, changed_paths, load_manifest
 from .model import Capsule, CapsuleResult, Manifest
+from .plan import PlanError, load_registry
 from .security import (
     MAX_BUNDLE_BYTES,
     MAX_MEMBER_BYTES,
@@ -253,6 +261,93 @@ def _validate_plan_provenance(workspace: Path, plan: dict) -> None:
             raise ManifestError(
                 f"provenance hash mismatch for {relative}: expected {expected}, found {actual}"
             )
+
+
+def _revision_text(workspace: Path, revision: str, relative: str) -> str | None:
+    object_name = f"{revision}:{relative}"
+    try:
+        size_raw = _git_output(workspace, ["cat-file", "-s", object_name])
+    except ManifestError:
+        return None
+    try:
+        size = int(size_raw.decode("ascii").strip())
+    except (UnicodeDecodeError, ValueError) as exc:
+        raise ManifestError(f"could not determine drift source size: {relative}") from exc
+    if size < 0 or size > MAX_REVISION_TEXT_BYTES:
+        raise ManifestError(
+            f"drift source exceeds {MAX_REVISION_TEXT_BYTES} byte limit: {relative}"
+        )
+    content = _git_output(workspace, ["show", object_name])
+    if len(content) > MAX_REVISION_TEXT_BYTES:
+        raise ManifestError(
+            f"drift source exceeds {MAX_REVISION_TEXT_BYTES} byte limit: {relative}"
+        )
+    try:
+        return content.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ManifestError(f"drift source is not UTF-8 text: {relative}") from exc
+
+
+def _validate_and_recompute_drift(workspace: Path, plan: dict) -> None:
+    drift = plan.get("drift")
+    policy_hash = plan["provenance"]["base_policy"]["sha256"]
+    changed = tuple(plan["changed_paths"])
+    try:
+        validate_drift_report(
+            drift,
+            base_sha=plan["base_sha"],
+            head_sha=plan["head_sha"],
+            base_policy_sha256=policy_hash,
+            changed=changed,
+        )
+    except DriftError as exc:
+        raise ManifestError(str(exc)) from exc
+    if not (workspace / ".git").exists():
+        return
+
+    policy_text = _revision_text(workspace, plan["base_sha"], plan["base_policy"])
+    if policy_text is None:
+        raise ManifestError("base policy is missing while recomputing drift")
+    try:
+        registry = load_registry(plan["base_policy"], policy_text)
+    except PlanError as exc:
+        raise ManifestError(f"base policy is invalid while recomputing drift: {exc}") from exc
+
+    proposed_text = _revision_text(workspace, plan["head_sha"], plan["base_policy"])
+    head_registry = None
+    head_error = None
+    if proposed_text is None:
+        head_error = "proposed head removes the protected registry"
+    else:
+        try:
+            head_registry = load_registry(plan["base_policy"], proposed_text)
+        except PlanError as exc:
+            head_error = str(exc)
+
+    def git_text(arguments: list[str]) -> str:
+        try:
+            return _git_output(workspace, arguments).decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise ManifestError("Git drift output is not UTF-8") from exc
+
+    try:
+        expected = analyze_drift(
+            mode=plan["mode"],
+            base_sha=plan["base_sha"],
+            head_sha=plan["head_sha"],
+            base_policy_sha256=policy_hash,
+            registry=registry,
+            git_output=git_text,
+            read_text=lambda revision, relative: _revision_text(
+                workspace, revision, relative
+            ),
+            head_registry=head_registry,
+            head_registry_error=head_error,
+        )
+    except DriftError as exc:
+        raise ManifestError(str(exc)) from exc
+    if drift != expected:
+        raise ManifestError("plan drift evidence does not match the authenticated revisions")
 
 
 def _plan_execution(item: dict, mode: str) -> dict:
@@ -1007,6 +1102,7 @@ def _write_plan_outputs(
         "toolchain": plan.get("toolchain", {}),
         "provenance": plan.get("provenance", {}),
         "changed_paths": plan.get("changed_paths", []),
+        "drift": plan.get("drift", {}),
         "contract_changes": plan.get("contract_changes", []),
         "plan_items": plan.get("items", []),
         "results": [result.to_dict() for result in results],
@@ -1097,6 +1193,7 @@ def run_verify_plan(
         ):
             raise ManifestError("plan contract_changes must be a list")
         _validate_plan_provenance(workspace, plan)
+        _validate_and_recompute_drift(workspace, plan)
 
         items = plan.get("items")
         if not isinstance(items, list):
@@ -1106,6 +1203,17 @@ def run_verify_plan(
         seen: set[str] = set()
         planned: list[tuple[dict, dict, Path]] = []
         has_gap = False
+        blocked = blocking_findings(plan["drift"])
+        if blocked:
+            results.append(
+                CapsuleResult(
+                    id="drift-integrity",
+                    description="Protected formal-policy drift",
+                    status="invalid_contract",
+                    duration_seconds=0.0,
+                    output=json.dumps(blocked, indent=2, sort_keys=True),
+                )
+            )
         for item in items:
             if not isinstance(item, dict):
                 raise ManifestError("each plan item must be an object")
@@ -1216,6 +1324,8 @@ def run_verify_plan(
         statuses = {result.status for result in results}
         if "counterexample" in statuses:
             conclusion, code = "counterexample", 10
+        elif "invalid_contract" in statuses:
+            conclusion, code = "invalid_contract", 13
         elif "inconclusive" in statuses:
             conclusion, code = "inconclusive", 11
         elif has_gap or "coverage_gap" in statuses:

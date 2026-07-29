@@ -22,13 +22,18 @@ esbmc_version = "8.4"
 [[critical_paths]]
 id = "server-state"
 description = "server state transitions"
-paths = ["server/src/server/**"]
+paths = ["server/src/server/prefix_cache_state.h"]
+watch_paths = ["server/src/server/*_state.h"]
+include_roots = ["server/src"]
 
 [[targets]]
 id = "slot-selector"
 policy = "required"
 source_paths = ["server/src/server/prefix_cache_state.h"]
-trigger_paths = ["server/src/server/prefix_cache_state.h"]
+trigger_paths = [
+  "formal/contracts/registry.toml",
+  "server/src/server/prefix_cache_state.h",
+]
 symbol = "dflash::common::select_inline_free_slot"
 signature = "int(int next_slot, int capacity, uint64_t occupied_slots)"
 template = "formal/contracts/templates/slot-selector.cpp.in"
@@ -91,6 +96,7 @@ class PlanTests(unittest.TestCase):
         return self._run(root, "rev-parse", "HEAD")
 
     def _commit_change(self, root: Path, path: str, contents: str) -> str:
+        (root / path).parent.mkdir(parents=True, exist_ok=True)
         (root / path).write_text(contents, encoding="utf-8")
         self._run(root, "add", path)
         self._run(root, "commit", "-qm", "change")
@@ -120,6 +126,14 @@ class PlanTests(unittest.TestCase):
             self.assertIn("select_inline_free_slot", generated)
             self.assertIn("static_assert(4 > 0)", generated)
             self.assertEqual(report["contract_changes"], [])
+            self.assertEqual(
+                report["drift"]["coordinate"]["merge_base_sha"],
+                base,
+            )
+            self.assertEqual(
+                report["drift"]["changes"][0]["paths"][0]["relations"],
+                ["declared_boundary", "target_trigger"],
+            )
             self.assertEqual(len(report["provenance"]["templates"]), 1)
             snapshots = item["provenance"]["contract_paths"]
             self.assertEqual(
@@ -158,6 +172,177 @@ class PlanTests(unittest.TestCase):
             report = json.loads((output / "plan.json").read_text(encoding="utf-8"))
             self.assertEqual(report["items"][0]["status"], "coverage_gap")
             self.assertEqual(report["items"][0]["critical_path"]["id"], "server-state")
+            self.assertEqual(
+                report["drift"]["changes"][0]["paths"][0]["relations"],
+                ["watch_match"],
+            )
+
+    def test_reports_transitively_included_header_without_overclaiming_coverage(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            base = self._workspace(root)
+            (root / "server/src/server/prefix_cache_state.h").write_text(
+                '#include "server/detail/eviction_policy.h"\n',
+                encoding="utf-8",
+            )
+            (root / "server/src/server/detail").mkdir(parents=True)
+            (root / "server/src/server/detail/eviction_policy.h").write_text(
+                "#pragma once\n",
+                encoding="utf-8",
+            )
+            self._run(root, "add", "server/src")
+            self._run(root, "commit", "-qm", "extract adjacent header")
+            head = self._run(root, "rev-parse", "HEAD")
+
+            output = root / "out"
+            run_plan(root, "formal/contracts/registry.toml", base, head, "pr", output)
+            report = json.loads((output / "plan.json").read_text(encoding="utf-8"))
+            adjacent = next(
+                relation
+                for change in report["drift"]["changes"]
+                for relation in change["paths"]
+                if relation["path"].endswith("eviction_policy.h")
+            )
+            self.assertEqual(adjacent["relations"], ["include_adjacent"])
+            self.assertEqual(adjacent["selected_targets"], [])
+            self.assertTrue(
+                any(
+                    item["status"] == "coverage_gap"
+                    and item["paths"] == [
+                        "server/src/server/detail/eviction_policy.h"
+                    ]
+                    for item in report["items"]
+                )
+            )
+
+    def test_unrelated_new_file_remains_explicitly_unmodeled(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            base = self._workspace(root)
+            head = self._commit_change(
+                root,
+                "server/src/server/unrelated.cpp",
+                "int unrelated = 0;\n",
+            )
+            output = root / "out"
+            run_plan(root, "formal/contracts/registry.toml", base, head, "pr", output)
+            report = json.loads((output / "plan.json").read_text(encoding="utf-8"))
+            self.assertEqual(report["items"][0]["status"], "not_applicable")
+            self.assertEqual(
+                report["drift"]["changes"][0]["paths"][0]["relations"],
+                ["unmodeled"],
+            )
+            self.assertEqual(report["drift"]["findings"], [])
+
+    def test_protected_boundary_rename_is_blocking_and_records_both_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            base = self._workspace(root)
+            self._run(
+                root,
+                "mv",
+                "server/src/server/prefix_cache_state.h",
+                "server/src/server/prefix_cache_state_v2.h",
+            )
+            self._run(root, "commit", "-qm", "rename protected boundary")
+            head = self._run(root, "rev-parse", "HEAD")
+            output = root / "out"
+            run_plan(root, "formal/contracts/registry.toml", base, head, "pr", output)
+            report = json.loads((output / "plan.json").read_text(encoding="utf-8"))
+            change = report["drift"]["changes"][0]
+            self.assertEqual(change["status"], "renamed")
+            self.assertEqual(
+                [relation["path"] for relation in change["paths"]],
+                [
+                    "server/src/server/prefix_cache_state.h",
+                    "server/src/server/prefix_cache_state_v2.h",
+                ],
+            )
+            finding = next(
+                finding
+                for finding in report["drift"]["findings"]
+                if finding["kind"] == "boundary_renamed"
+            )
+            self.assertEqual(finding["severity"], "blocking")
+
+    def test_policy_shrink_is_blocking_but_old_target_is_still_planned(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            base = self._workspace(root)
+            proposed = REGISTRY.replace(
+                'paths = ["server/src/server/prefix_cache_state.h"]',
+                'paths = ["server/src/server/replacement_state.h"]',
+            )
+            head = self._commit_change(
+                root,
+                "formal/contracts/registry.toml",
+                proposed,
+            )
+            output = root / "out"
+            run_plan(root, "formal/contracts/registry.toml", base, head, "pr", output)
+            report = json.loads((output / "plan.json").read_text(encoding="utf-8"))
+            self.assertEqual(report["items"][0]["status"], "planned")
+            self.assertEqual(report["items"][0]["id"], "slot-selector")
+            self.assertTrue(report["contract_changes"])
+            self.assertEqual(
+                report["drift"]["policy_delta"]["removed_boundaries"],
+                ["server-state:server/src/server/prefix_cache_state.h"],
+            )
+            self.assertTrue(
+                any(
+                    finding["kind"] == "policy_shrunk"
+                    and finding["severity"] == "blocking"
+                    for finding in report["drift"]["findings"]
+                )
+            )
+
+    def test_submodule_pointer_inventory_records_base_and_head(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            initial = self._workspace(root)
+            (root / ".gitmodules").write_text(
+                '[submodule "dep"]\n'
+                "\tpath = server/deps/dep\n"
+                "\turl = https://example.invalid/dep.git\n",
+                encoding="utf-8",
+            )
+            self._run(root, "add", ".gitmodules")
+            self._run(
+                root,
+                "update-index",
+                "--add",
+                "--cacheinfo",
+                f"160000,{initial},server/deps/dep",
+            )
+            self._run(root, "commit", "-qm", "add submodule pointer")
+            base = self._run(root, "rev-parse", "HEAD")
+            self._run(
+                root,
+                "update-index",
+                "--cacheinfo",
+                f"160000,{base},server/deps/dep",
+            )
+            self._run(root, "commit", "-qm", "bump submodule pointer")
+            head = self._run(root, "rev-parse", "HEAD")
+            output = root / "out"
+            run_plan(root, "formal/contracts/registry.toml", base, head, "pr", output)
+            report = json.loads((output / "plan.json").read_text(encoding="utf-8"))
+            self.assertEqual(
+                report["drift"]["coordinate"]["submodules"],
+                [
+                    {
+                        "path": "server/deps/dep",
+                        "base_sha": initial,
+                        "head_sha": base,
+                    }
+                ],
+            )
+            self.assertTrue(
+                any(
+                    finding["kind"] == "dependency_changed"
+                    for finding in report["drift"]["findings"]
+                )
+            )
 
     def test_rejects_non_sha_revisions(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

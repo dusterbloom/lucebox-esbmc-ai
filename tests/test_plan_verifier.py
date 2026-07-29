@@ -30,7 +30,7 @@ paths = ["server/src/**"]
 id = "state-contract"
 policy = "required"
 source_paths = ["server/src/state.h"]
-trigger_paths = ["server/src/state.h"]
+trigger_paths = ["formal/contracts/registry.toml", "server/src/state.h"]
 symbol = "verify_state"
 signature = "int()"
 template = "formal/contracts/state.cpp.in"
@@ -156,6 +156,58 @@ fi
             self.assertIn('errors="1"', junit)
             summary = (root / "tampered/summary.md").read_text(encoding="utf-8")
             self.assertNotIn("hash mismatch", summary)
+
+    def test_rejects_tampered_drift_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            base, head = self._workspace(root)
+            plan = self._plan(root, base, head)
+            payload = json.loads(plan.read_text(encoding="utf-8"))
+            payload["drift"]["coordinate"]["merge_base_sha"] = "0" * 40
+            plan.write_text(
+                json.dumps(payload, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            code = run_verify_plan(root, plan, plan.parent, root / "tampered-drift")
+            self.assertEqual(code, 13)
+            report = json.loads(
+                (root / "tampered-drift/report.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(report["conclusion"], "invalid_contract")
+            self.assertIn("drift evidence", report["error"])
+
+    def test_policy_shrink_runs_base_contract_then_blocks(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            base, _ = self._workspace(root)
+            registry = root / "formal/contracts/registry.toml"
+            registry.write_text(
+                REGISTRY.replace(
+                    'paths = ["server/src/**"]',
+                    'paths = ["server/other/**"]',
+                ),
+                encoding="utf-8",
+            )
+            self._git(root, "add", str(registry.relative_to(root)))
+            self._git(root, "commit", "-qm", "shrink protected policy")
+            head = self._git(root, "rev-parse", "HEAD")
+            fake = self._fake_esbmc(root)
+            plan = self._plan(root, base, head)
+            with patch.dict(
+                os.environ,
+                {"ESBMC_PATH": str(fake), "FAKE_RESULT": "success"},
+            ):
+                code = run_verify_plan(root, plan, plan.parent, root / "policy-shrink")
+            self.assertEqual(code, 13)
+            report = json.loads(
+                (root / "policy-shrink/report.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(report["conclusion"], "invalid_contract")
+            statuses = {
+                result["id"]: result["status"] for result in report["results"]
+            }
+            self.assertEqual(statuses["state-contract"], "verified")
+            self.assertEqual(statuses["drift-integrity"], "invalid_contract")
 
     def test_divergent_base_and_head_are_valid_exact_revisions(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

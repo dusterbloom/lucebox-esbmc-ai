@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import fnmatch
 import hashlib
 import json
 import re
@@ -9,7 +8,14 @@ import tomllib
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from .model import ContractRegistry, RegistryTarget
+from .drift import (
+    MAX_REVISION_TEXT_BYTES,
+    DriftError,
+    analyze_drift,
+    drift_changed_paths,
+    matches,
+)
+from .model import ContractRegistry, CriticalArea, RegistryTarget
 from .security import sanitized_subprocess_environment
 
 
@@ -27,7 +33,6 @@ MAX_RENDERED_HARNESS_BYTES = 1_000_000
 MAX_TOTAL_CONTRACT_BYTES = 8_000_000
 MAX_TARGETS = 128
 MAX_CRITICAL_PATHS = 64
-MAX_CHANGED_PATHS = 512
 MAX_PLAN_ITEMS = 1_024
 
 
@@ -90,7 +95,7 @@ def load_registry(path: str, contents: str) -> ContractRegistry:
         raise PlanError("toolchain must be a table")
     if not isinstance(toolchain.get("esbmc_version"), str) or not toolchain["esbmc_version"]:
         raise PlanError("toolchain.esbmc_version must be a non-empty string")
-    critical_paths: list[dict[str, Any]] = []
+    critical_paths: list[CriticalArea] = []
     seen_critical: set[str] = set()
     raw_critical_paths = data.get("critical_paths", [])
     if not isinstance(raw_critical_paths, list):
@@ -112,7 +117,19 @@ def load_registry(path: str, contents: str) -> ContractRegistry:
         paths = _paths(raw_critical, "paths", required=True)
         if not paths:
             raise PlanError(f"{critical_id}: critical paths must not be empty")
-        critical_paths.append({"id": critical_id, "description": description, "paths": list(paths)})
+        critical_policy = raw_critical.get("policy", "advisory")
+        if critical_policy not in {"required", "advisory"}:
+            raise PlanError(f"{critical_id}: critical-path policy must be required or advisory")
+        critical_paths.append(
+            CriticalArea(
+                id=critical_id,
+                description=description,
+                paths=paths,
+                watch_paths=_paths(raw_critical, "watch_paths"),
+                include_roots=_paths(raw_critical, "include_roots"),
+                policy=critical_policy,
+            )
+        )
 
     targets: list[RegistryTarget] = []
     seen: set[str] = set()
@@ -234,20 +251,39 @@ def _base_file(workspace: Path, base_sha: str, relative: str, maximum_bytes: int
     return data
 
 
-def _changed_paths(workspace: Path, base_sha: str, head_sha: str, mode: str) -> tuple[str, ...]:
-    if mode != "pr":
-        return ()
-    output = _git(workspace, ["diff", "--name-only", f"{base_sha}...{head_sha}"])
-    paths: list[str] = []
-    for line in output.splitlines():
-        paths.append(_repo_path(line, "changed path"))
-        if len(paths) > MAX_CHANGED_PATHS:
-            raise PlanError(f"changed path list exceeds {MAX_CHANGED_PATHS} entries")
-    return tuple(paths)
-
-
 def _matches(paths: tuple[str, ...], patterns: tuple[str, ...]) -> bool:
-    return any(fnmatch.fnmatchcase(path, pattern) for path in paths for pattern in patterns)
+    return any(matches(path, patterns) for path in paths)
+
+
+def _revision_text(workspace: Path, revision: str, relative: str) -> str | None:
+    """Read one bounded committed text blob, returning None when it is absent."""
+
+    object_name = f"{revision}:{relative}"
+    exists = subprocess.run(
+        ["git", "cat-file", "-e", object_name],
+        cwd=workspace,
+        check=False,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        env=sanitized_subprocess_environment(),
+    )
+    if exists.returncode != 0:
+        return None
+    size_text = _git(workspace, ["cat-file", "-s", object_name]).strip()
+    try:
+        size = int(size_text)
+    except ValueError as exc:
+        raise PlanError(f"could not determine drift source size: {relative}") from exc
+    if size < 0 or size > MAX_REVISION_TEXT_BYTES:
+        raise PlanError(
+            f"drift source exceeds {MAX_REVISION_TEXT_BYTES} byte limit: {relative}"
+        )
+    data = _git(workspace, ["show", object_name])
+    if len(data.encode("utf-8")) > MAX_REVISION_TEXT_BYTES:
+        raise PlanError(
+            f"drift source exceeds {MAX_REVISION_TEXT_BYTES} byte limit: {relative}"
+        )
+    return data
 
 
 def _render(template: bytes, target: RegistryTarget) -> bytes:
@@ -346,7 +382,33 @@ def run_plan(
     base_policy = _repo_path(base_policy, "base_policy")
     policy_bytes = _base_file(workspace, base_sha, base_policy, MAX_REGISTRY_BYTES)
     registry = load_registry(base_policy, policy_bytes.decode("utf-8"))
-    changed = _changed_paths(workspace, base_sha, head_sha, mode)
+    head_registry: ContractRegistry | None = None
+    head_registry_error: str | None = None
+    proposed_policy = _revision_text(workspace, head_sha, base_policy)
+    if proposed_policy is None:
+        head_registry_error = "proposed head removes the protected registry"
+    else:
+        try:
+            head_registry = load_registry(base_policy, proposed_policy)
+        except PlanError as exc:
+            head_registry_error = str(exc)
+    try:
+        drift = analyze_drift(
+            mode=mode,
+            base_sha=base_sha,
+            head_sha=head_sha,
+            base_policy_sha256=_sha256(policy_bytes),
+            registry=registry,
+            git_output=lambda arguments: _git(workspace, arguments),
+            read_text=lambda revision, relative: _revision_text(
+                workspace, revision, relative
+            ),
+            head_registry=head_registry,
+            head_registry_error=head_registry_error,
+        )
+        changed = drift_changed_paths(drift)
+    except DriftError as exc:
+        raise PlanError(str(exc)) from exc
     output_dir.mkdir(parents=True, exist_ok=True)
     generated_dir = output_dir / "generated"
     generated_dir.mkdir(exist_ok=True)
@@ -442,10 +504,19 @@ def run_plan(
 
     if mode == "pr":
         unmatched = [path for path in changed if path not in selected_paths]
+        relation_by_path = {
+            relation["path"]: relation
+            for change in drift["changes"]
+            for relation in change["paths"]
+        }
+        areas_by_id = {area.id: area for area in registry.critical_paths}
         ordinary: list[str] = []
         for path in unmatched:
+            relation = relation_by_path.get(path, {})
             areas = [
-                area for area in registry.critical_paths if _matches((path,), tuple(area["paths"]))
+                areas_by_id[area_id]
+                for area_id in relation.get("areas", [])
+                if area_id in areas_by_id
             ]
             if not areas:
                 ordinary.append(path)
@@ -455,12 +526,19 @@ def run_plan(
                     items,
                     {
                         "id": "coverage-gap-"
-                        + area["id"]
+                        + area.id
                         + "-"
                         + _sha256(path.encode("utf-8"))[:12],
                         "status": "coverage_gap",
-                        "reason": "changed critical path has no approved target",
-                        "critical_path": area,
+                        "reason": "changed formal-risk path has no approved target",
+                        "critical_path": {
+                            "id": area.id,
+                            "description": area.description,
+                            "paths": list(area.paths),
+                            "watch_paths": list(area.watch_paths),
+                            "include_roots": list(area.include_roots),
+                            "policy": area.policy,
+                        },
                         "paths": [path],
                     },
                 )
@@ -494,6 +572,7 @@ def run_plan(
         "head_sha": head_sha,
         "mode": mode,
         "changed_paths": list(changed),
+        "drift": drift,
         "toolchain": registry.toolchain,
         "provenance": {
             "base_policy": {"path": base_policy, "sha256": _sha256(policy_bytes)},
