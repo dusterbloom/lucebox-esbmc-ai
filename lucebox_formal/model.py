@@ -31,6 +31,41 @@ class Manifest:
     capsules: tuple[Capsule, ...]
 
 
+@dataclass(frozen=True)
+class RegistryTarget:
+    """An approved, base-revision contract template binding."""
+
+    id: str
+    source_paths: tuple[str, ...]
+    trigger_paths: tuple[str, ...]
+    policy: str
+    symbol: str
+    signature: str
+    template: str
+    template_variables: dict[str, str]
+    description: str
+    entry_function: str
+    include_dirs: tuple[str, ...]
+    timeout_seconds: int
+    pr_defines: tuple[str, ...]
+    nightly_defines: tuple[str, ...]
+    pr_esbmc_args: tuple[str, ...]
+    nightly_esbmc_args: tuple[str, ...]
+    mutable_paths: tuple[str, ...]
+    contract_paths: tuple[str, ...]
+    native_test: str | None = None
+    native_test_source: str | None = None
+
+
+@dataclass(frozen=True)
+class ContractRegistry:
+    path: str
+    schema_version: int
+    toolchain: dict[str, Any]
+    critical_paths: tuple[dict[str, Any], ...]
+    targets: tuple[RegistryTarget, ...]
+
+
 @dataclass
 class CapsuleResult:
     id: str

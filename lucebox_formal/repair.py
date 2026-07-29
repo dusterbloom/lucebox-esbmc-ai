@@ -15,8 +15,7 @@ from .security import (
     sha256_file,
     validate_patch_paths,
 )
-from .verifier import run_verify
-
+from .verifier import run_verify, run_verify_plan
 
 MAX_PATCH_BYTES = 256_000
 
@@ -48,8 +47,8 @@ def _esbmc_ai_model_class():
     # to parse `lucebox-formal propose --bundle ...` rejects our arguments
     # before any model request. Initialize its singleton explicitly with CLI
     # parsing disabled before AIModel asks Config for request settings.
-    from esbmc_ai.config import Config as ESBMCAIConfig
     from esbmc_ai.ai_models import AIModel
+    from esbmc_ai.config import Config as ESBMCAIConfig
 
     ESBMCAIConfig(_cli_parse_args=False)
     return AIModel
@@ -79,6 +78,9 @@ def _load_failure(bundle: Path, workspace: Path) -> dict:
     failure = json.loads(failure_path.read_text(encoding="utf-8"))
     if failure.get("schema_version") != 1:
         raise BundleError("unsupported failure bundle schema")
+    verification_kind = failure.get("verification_kind", "manifest")
+    if verification_kind not in {"manifest", "plan"}:
+        raise BundleError("failure bundle has invalid verification kind")
 
     mutable_paths = failure.get("mutable_paths")
     if not isinstance(mutable_paths, list) or not mutable_paths:
@@ -90,18 +92,37 @@ def _load_failure(bundle: Path, workspace: Path) -> dict:
         if not path.is_file():
             raise BundleError(f"mutable file is missing: {relative}")
     _validate_contracts(workspace, failure.get("contract_hashes", {}))
+    if verification_kind == "plan":
+        plan_bundle = failure.get("plan_bundle")
+        if not isinstance(plan_bundle, dict):
+            raise BundleError("plan failure bundle is missing plan metadata")
+        for field in ("plan_path", "generated_root", "item_id"):
+            if not isinstance(plan_bundle.get(field), str):
+                raise BundleError(f"plan bundle has invalid {field}")
+        plan_path = safe_repo_path(workspace, plan_bundle["plan_path"])
+        generated_root = safe_repo_path(workspace, plan_bundle["generated_root"])
+        if not plan_path.is_file() or not generated_root.is_dir():
+            raise BundleError("plan replay inputs are missing")
+        plan_item = failure.get("plan_item")
+        if not isinstance(plan_item, dict) or plan_item.get("id") != plan_bundle["item_id"]:
+            raise BundleError("plan failure item does not match replay metadata")
     return failure
 
 
 def _prompt(failure: dict, workspace: Path) -> str:
-    capsule = failure["capsule"]
+    if failure.get("verification_kind", "manifest") == "plan":
+        capsule = failure["plan_item"]
+        contract_paths = capsule["execution"]["contract_paths"]
+    else:
+        capsule = failure["capsule"]
+        contract_paths = capsule["contract_paths"]
     sections = [
         "CAPSULE:",
         capsule["id"],
         "",
         "DECLARED PROPERTIES AND BOUNDS:",
     ]
-    for relative in capsule["contract_paths"]:
+    for relative in contract_paths:
         path = safe_repo_path(workspace, relative)
         sections.extend([f"--- {relative}", path.read_text(encoding="utf-8")])
     sections.extend(
@@ -126,9 +147,7 @@ def _prompt(failure: dict, workspace: Path) -> str:
     return "\n".join(sections)
 
 
-def _validate_contracts(
-    workspace: Path, expected_hashes: dict[str, str]
-) -> None:
+def _validate_contracts(workspace: Path, expected_hashes: dict[str, str]) -> None:
     if not isinstance(expected_hashes, dict) or not expected_hashes:
         raise BundleError("failure bundle declares no immutable contracts")
     for relative, expected in expected_hashes.items():
@@ -211,12 +230,8 @@ def run_propose(bundle: Path, model: str, output_dir: Path) -> int:
         diagnosis, patch = _extract_patch(response_text)
         validate_patch_paths(patch, mutable_paths)
 
-        (output_dir / "candidate.patch").write_text(
-            patch, encoding="utf-8"
-        )
-        (output_dir / "diagnosis.md").write_text(
-            diagnosis + "\n", encoding="utf-8"
-        )
+        (output_dir / "candidate.patch").write_text(patch, encoding="utf-8")
+        (output_dir / "diagnosis.md").write_text(diagnosis + "\n", encoding="utf-8")
         (output_dir / "proposal-report.json").write_text(
             json.dumps(
                 {
@@ -280,31 +295,36 @@ def run_validate(bundle: Path, patch_path: Path, output_dir: Path) -> int:
             return 20
 
         _validate_contracts(workspace, failure["contract_hashes"])
-        manifest_path = workspace / "formal/manifest.toml"
-        capsule_id = failure["capsule"]["id"]
         verify_output = Path(temp) / "formal-results"
-        verify_code = run_verify(
-            manifest_path,
-            base_sha="",
-            mode="all",
-            output_dir=verify_output,
-            only_capsules={capsule_id},
-        )
-        manifest = load_manifest(manifest_path)
-        try:
-            capsule = next(
-                item for item in manifest.capsules if item.id == capsule_id
+        verification_kind = failure.get("verification_kind", "manifest")
+        if verification_kind == "plan":
+            plan_bundle = failure["plan_bundle"]
+            capsule_id = plan_bundle["item_id"]
+            verify_code = run_verify_plan(
+                workspace,
+                safe_repo_path(workspace, plan_bundle["plan_path"]),
+                safe_repo_path(workspace, plan_bundle["generated_root"]),
+                verify_output,
             )
-        except StopIteration as exc:
-            raise BundleError(
-                f"manifest no longer contains capsule {capsule_id}"
-            ) from exc
-        native_ok, native_output = _run_native_test(
-            workspace, capsule.native_test_source
-        )
-        report = json.loads(
-            (verify_output / "report.json").read_text(encoding="utf-8")
-        )
+            native_source = failure.get("native_test_source")
+        else:
+            manifest_path = workspace / "formal/manifest.toml"
+            capsule_id = failure["capsule"]["id"]
+            verify_code = run_verify(
+                manifest_path,
+                base_sha="",
+                mode="all",
+                output_dir=verify_output,
+                only_capsules={capsule_id},
+            )
+            manifest = load_manifest(manifest_path)
+            try:
+                capsule = next(item for item in manifest.capsules if item.id == capsule_id)
+            except StopIteration as exc:
+                raise BundleError(f"manifest no longer contains capsule {capsule_id}") from exc
+            native_source = capsule.native_test_source
+        native_ok, native_output = _run_native_test(workspace, native_source)
+        report = json.loads((verify_output / "report.json").read_text(encoding="utf-8"))
         counterexamples = verify_output / "counterexamples"
         if counterexamples.is_dir():
             shutil.copytree(
@@ -312,15 +332,22 @@ def run_validate(bundle: Path, patch_path: Path, output_dir: Path) -> int:
                 output_dir / "counterexamples",
                 dirs_exist_ok=True,
             )
-        successful = verify_code == 0 and native_ok
+        if verification_kind == "plan":
+            matching = [
+                result for result in report.get("results", []) if result.get("id") == capsule_id
+            ]
+            formal_ok = (
+                verify_code == 0 and len(matching) == 1 and matching[0].get("status") == "verified"
+            )
+        else:
+            formal_ok = verify_code == 0
+        successful = formal_ok and native_ok
         detail = (
             "candidate passed the immutable formal and native contracts"
             if successful
             else "candidate did not pass revalidation"
         )
-        _write_validation_report(
-            output_dir, successful, detail, report, native_output
-        )
+        _write_validation_report(output_dir, successful, detail, report, native_output)
         if successful:
             shutil.copyfile(patch_path, output_dir / "candidate.patch")
         return 0 if successful else 20
