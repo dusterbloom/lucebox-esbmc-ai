@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "lucebox-esbmc-ai"
-version = "0.2.0"
+version = "0.2.1"
 description = "Proof-carrying ESBMC and ESBMC-AI CI adapter for Lucebox"
 readme = "README.md"
 requires-python = ">=3.12"

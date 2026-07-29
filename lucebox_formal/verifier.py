@@ -33,6 +33,7 @@ MAX_CHANGED_PATHS = 4096
 MAX_GENERATED_HARNESS_BYTES = 1_000_000
 MAX_CONTRACT_SNAPSHOT_BYTES = 1_000_000
 MAX_TOTAL_CONTRACT_SNAPSHOT_BYTES = 8_000_000
+NATIVE_TEST_TIMEOUT_SECONDS = 120
 GIT_SHA = re.compile(r"^[0-9a-f]{40}$")
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
 PLAN_ITEM_ID = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
@@ -276,6 +277,10 @@ def _plan_execution(item: dict, mode: str) -> dict:
     native_source = execution.get("native_test_source")
     if native_source is not None:
         native_source = _plan_repo_path(native_source, "execution.native_test_source")
+    if (native_test is None) != (native_source is None):
+        raise ManifestError(
+            "execution.native_test and execution.native_test_source must be declared together"
+        )
     includes = _plan_repo_paths(execution, "include_dirs")
     defines = _plan_string_list(execution, "defines")
     esbmc_args = _plan_string_list(execution, "esbmc_args")
@@ -412,6 +417,106 @@ def _validate_head_sources(workspace: Path, plan: dict, item: dict, execution: d
         committed = _git_output(workspace, ["show", f"{plan['head_sha']}:{relative}"])
         if hashlib.sha256(committed).hexdigest() != sha256_file(working):
             raise ManifestError(f"{item['id']}: workspace source differs from head: {relative}")
+
+
+def _verify_plan_native_test(
+    workspace: Path,
+    item: dict,
+    execution: dict,
+    output_dir: Path,
+) -> CapsuleResult:
+    source_relative = execution["native_test_source"]
+    if not source_relative:
+        raise ManifestError(f"{item['id']}: native test source is missing")
+    snapshots = [
+        contract
+        for contract in item["provenance"].get("contract_paths", [])
+        if contract.get("path") == source_relative
+    ]
+    if len(snapshots) != 1:
+        raise ManifestError(
+            f"{item['id']}: expected one base native test snapshot for {source_relative}"
+        )
+    source_content = snapshots[0]["content"]
+    source_hash = snapshots[0]["sha256"]
+    started = time.monotonic()
+    status = "inconclusive"
+    return_code: int | None = None
+    output = ""
+    command: list[str] = []
+
+    with tempfile.TemporaryDirectory(prefix=f".{item['id']}-native-") as temp:
+        native_root = Path(temp)
+        source_path = native_root / Path(source_relative).name
+        executable = native_root / "native-test"
+        source_path.write_text(source_content, encoding="utf-8")
+        compile_command = [
+            "c++",
+            "-std=c++17",
+            "-O0",
+            "-Wall",
+            "-Wextra",
+            "-Werror",
+        ]
+        for include_dir in execution["include_dirs"]:
+            compile_command.extend(["-I", str(safe_repo_path(workspace, include_dir))])
+        compile_command.extend([str(source_path), "-o", str(executable)])
+        command = compile_command
+        try:
+            compiled = subprocess.run(
+                compile_command,
+                cwd=workspace,
+                check=False,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                timeout=NATIVE_TEST_TIMEOUT_SECONDS,
+                env=sanitized_subprocess_environment(),
+            )
+            output = "native compile output:\n" + compiled.stdout
+            if compiled.returncode != 0:
+                return_code = compiled.returncode
+            else:
+                command = [str(executable)]
+                tested = subprocess.run(
+                    command,
+                    cwd=workspace,
+                    check=False,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    timeout=NATIVE_TEST_TIMEOUT_SECONDS,
+                    env=sanitized_subprocess_environment(),
+                )
+                return_code = tested.returncode
+                output += "native test output:\n" + tested.stdout
+                status = "verified" if tested.returncode == 0 else "counterexample"
+        except subprocess.TimeoutExpired as exc:
+            captured = exc.stdout or ""
+            if isinstance(captured, bytes):
+                captured = captured.decode("utf-8", errors="replace")
+            output += f"native test timed out:\n{captured}"
+        except OSError as exc:
+            output += f"native test could not execute: {exc}"
+
+    encoded = output.encode("utf-8")
+    if len(encoded) > MAX_CAPTURE_BYTES:
+        output = encoded[:MAX_CAPTURE_BYTES].decode("utf-8", errors="replace")
+        output += "\n[lucebox-formal: native output truncated]\n"
+    return CapsuleResult(
+        id=item["id"],
+        description=f"{execution['description']} (base-approved native regression)",
+        status=status,
+        duration_seconds=time.monotonic() - started,
+        command=command,
+        output=output,
+        return_code=return_code,
+        assumptions={
+            "native_test": execution["native_test"],
+            "native_test_source": source_relative,
+            "native_test_source_sha256": source_hash,
+        },
+    )
 
 
 def _verify_plan_item(
@@ -1077,6 +1182,25 @@ def run_verify_plan(
                     mode,
                     output_dir,
                 )
+                if result.status == "verified" and execution["native_test_source"]:
+                    native_result = _verify_plan_native_test(
+                        workspace,
+                        item,
+                        execution,
+                        output_dir,
+                    )
+                    result.duration_seconds += native_result.duration_seconds
+                    result.output += (
+                        "\n[base-approved native regression]\n" + native_result.output
+                    )
+                    result.assumptions["native_test"] = {
+                        **native_result.assumptions,
+                        "status": native_result.status,
+                        "command": native_result.command,
+                    }
+                    if native_result.status != "verified":
+                        result.status = native_result.status
+                        result.return_code = native_result.return_code
                 results.append(result)
                 if result.status == "counterexample":
                     _create_plan_failure_bundle(

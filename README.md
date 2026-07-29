@@ -13,7 +13,9 @@ revision recorded in the plan. It does not claim whole-program correctness.
   selects targets from changed paths, and renders deterministic C++ harnesses.
 - `verify` authenticates the plan, base policy, templates, contract snapshots,
   generated harnesses, and head checkout before invoking ESBMC without network
-  access or credentials.
+  access or credentials. When a target declares a native regression, it
+  compiles the immutable base snapshot against the exact head sources and runs
+  it inside the same constrained container.
 - `propose` and `validate` form the advisory repair lane. The credential-bearing
   proposer never executes candidate code; a second secretless container applies
   and reverifies it against the exact immutable failure bundle.
@@ -54,7 +56,9 @@ Plan verification produces JSON, JUnit, Markdown, native ESBMC HTML reports,
 and bounded evidence bundles. Its machine conclusions are `verified`,
 `counterexample`, `invalid_contract`, `inconclusive`, `coverage_gap`, and
 `not_applicable`. Coverage gaps are advisory in schema v1; they are never
-reported as verified.
+reported as verified. A declared base-approved native regression is part of
+the deterministic result: compilation failure is inconclusive and a failing
+regression is a counterexample.
 
 ## Advisory AI configuration
 

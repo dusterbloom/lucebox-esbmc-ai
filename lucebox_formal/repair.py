@@ -306,7 +306,8 @@ def run_validate(bundle: Path, patch_path: Path, output_dir: Path) -> int:
                 safe_repo_path(workspace, plan_bundle["generated_root"]),
                 verify_output,
             )
-            native_source = failure.get("native_test_source")
+            native_ok = True
+            native_output = "base-approved native regression executed by plan verifier"
         else:
             manifest_path = workspace / "formal/manifest.toml"
             capsule_id = failure["capsule"]["id"]
@@ -323,7 +324,7 @@ def run_validate(bundle: Path, patch_path: Path, output_dir: Path) -> int:
             except StopIteration as exc:
                 raise BundleError(f"manifest no longer contains capsule {capsule_id}") from exc
             native_source = capsule.native_test_source
-        native_ok, native_output = _run_native_test(workspace, native_source)
+            native_ok, native_output = _run_native_test(workspace, native_source)
         report = json.loads((verify_output / "report.json").read_text(encoding="utf-8"))
         counterexamples = verify_output / "counterexamples"
         if counterexamples.is_dir():

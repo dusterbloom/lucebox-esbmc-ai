@@ -36,9 +36,15 @@ signature = "int()"
 template = "formal/contracts/state.cpp.in"
 description = "state contract"
 entry_function = "verify_state"
+include_dirs = ["server/src"]
 timeout_seconds = 10
 mutable_paths = ["server/src/state.h"]
-contract_paths = ["formal/contracts/properties.md"]
+contract_paths = [
+  "formal/contracts/properties.md",
+  "server/test/test_state.cpp",
+]
+native_test = "test_state"
+native_test_source = "server/test/test_state.cpp"
 """
 
 
@@ -59,16 +65,30 @@ class PlanVerifierTests(unittest.TestCase):
         self._git(root, "config", "user.name", "Formal Test")
         (root / "formal/contracts").mkdir(parents=True)
         (root / "server/src").mkdir(parents=True)
+        (root / "server/test").mkdir(parents=True)
         (root / "formal/contracts/registry.toml").write_text(REGISTRY, encoding="utf-8")
         (root / "formal/contracts/state.cpp.in").write_text(
             "int verify_state() { return 0; }\n", encoding="utf-8"
         )
         (root / "formal/contracts/properties.md").write_text("state is safe\n", encoding="utf-8")
-        (root / "server/src/state.h").write_text("#pragma once\n", encoding="utf-8")
+        (root / "server/src/state.h").write_text(
+            "#pragma once\ninline int state_value() { return 1; }\n",
+            encoding="utf-8",
+        )
+        (root / "server/test/test_state.cpp").write_text(
+            '#include "state.h"\n'
+            "int main() { return state_value() == 1 ? 0 : 1; }\n",
+            encoding="utf-8",
+        )
         self._git(root, "add", ".")
         self._git(root, "commit", "-qm", "base")
         base = self._git(root, "rev-parse", "HEAD")
-        (root / "server/src/state.h").write_text("#pragma once\n// changed\n", encoding="utf-8")
+        (root / "server/src/state.h").write_text(
+            "#pragma once\n"
+            "inline int state_value() { return 1; }\n"
+            "// changed\n",
+            encoding="utf-8",
+        )
         self._git(root, "add", "server/src/state.h")
         self._git(root, "commit", "-qm", "change")
         return base, self._git(root, "rev-parse", "HEAD")
@@ -243,8 +263,9 @@ fi
 diff --git a/server/src/state.h b/server/src/state.h
 --- a/server/src/state.h
 +++ b/server/src/state.h
-@@ -1,2 +1,3 @@
+@@ -1,3 +1,4 @@
  #pragma once
+ inline int state_value() { return 1; }
  // changed
 +// repaired
 """,
@@ -259,6 +280,53 @@ diff --git a/server/src/state.h b/server/src/state.h
             report = json.loads((accepted / "validation-report.json").read_text(encoding="utf-8"))
             self.assertTrue(report["successful"])
             self.assertEqual(report["formal_report"]["conclusion"], "verified")
+
+    def test_base_native_regression_catches_head_test_weakening(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            base, _ = self._workspace(root)
+            (root / "server/src/state.h").write_text(
+                "#pragma once\n"
+                "inline int state_value() { return 0; }\n"
+                "// call-site regression\n",
+                encoding="utf-8",
+            )
+            (root / "server/test/test_state.cpp").write_text(
+                "int main() { return 0; }\n",
+                encoding="utf-8",
+            )
+            self._git(root, "add", "server/src/state.h", "server/test/test_state.cpp")
+            self._git(root, "commit", "-qm", "regress state and weaken head test")
+            head = self._git(root, "rev-parse", "HEAD")
+            fake = self._fake_esbmc(root)
+            plan = self._plan(root, base, head)
+            output = root / "native-failure"
+            with patch.dict(
+                os.environ,
+                {"ESBMC_PATH": str(fake), "FAKE_RESULT": "success"},
+            ):
+                code = run_verify_plan(root, plan, plan.parent, output)
+
+            self.assertEqual(code, 10)
+            report = json.loads((output / "report.json").read_text(encoding="utf-8"))
+            result = next(
+                item for item in report["results"] if item["id"] == "state-contract"
+            )
+            self.assertEqual(result["status"], "counterexample")
+            self.assertEqual(
+                result["assumptions"]["native_test"]["native_test_source"],
+                "server/test/test_state.cpp",
+            )
+            self.assertIn("base-approved native regression", result["output"])
+
+            bundle = next(output.glob("failure-bundle-*.tar.gz"))
+            with tarfile.open(bundle, "r:gz") as archive:
+                bundled_test = archive.extractfile("server/test/test_state.cpp").read()
+            self.assertIn(b"state_value() == 1", bundled_test)
+            self.assertNotEqual(
+                bundled_test,
+                (root / "server/test/test_state.cpp").read_bytes(),
+            )
 
 
 if __name__ == "__main__":
