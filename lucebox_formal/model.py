@@ -13,6 +13,7 @@ class Capsule:
     entry_function: str
     include_dirs: tuple[str, ...]
     timeout_seconds: int
+    nightly_timeout_seconds: int
     defines: tuple[str, ...]
     nightly_defines: tuple[str, ...]
     esbmc_args: tuple[str, ...]
@@ -47,6 +48,7 @@ class RegistryTarget:
     entry_function: str
     include_dirs: tuple[str, ...]
     timeout_seconds: int
+    nightly_timeout_seconds: int
     pr_defines: tuple[str, ...]
     nightly_defines: tuple[str, ...]
     pr_esbmc_args: tuple[str, ...]

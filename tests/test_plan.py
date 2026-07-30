@@ -45,6 +45,7 @@ description = "slot selector"
 entry_function = "verify_slot_selector"
 include_dirs = ["server/src"]
 timeout_seconds = 30
+nightly_timeout_seconds = 45
 pr_defines = ["CAP=4"]
 nightly_defines = ["CAP=16"]
 pr_esbmc_args = ["--unwind", "5"]
@@ -126,6 +127,8 @@ class PlanTests(unittest.TestCase):
             self.assertEqual(item["execution"]["entry_function"], "verify_slot_selector")
             self.assertEqual(item["execution"]["policy"], "required")
             self.assertEqual(item["execution"]["defines"], ["CAP=4"])
+            self.assertEqual(item["execution"]["timeout_seconds"], 30)
+            self.assertEqual(item["execution"]["nightly_timeout_seconds"], 45)
             self.assertEqual(
                 item["execution"]["mutable_paths"], ["server/src/server/prefix_cache_state.h"]
             )

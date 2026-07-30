@@ -68,14 +68,16 @@ def _command(
     capsule: Capsule,
     mode: str,
 ) -> list[str]:
-    defines = capsule.nightly_defines if mode == "nightly" else capsule.defines
+    nightly = mode == "nightly"
+    defines = capsule.nightly_defines if nightly else capsule.defines
+    timeout_seconds = capsule.nightly_timeout_seconds if nightly else capsule.timeout_seconds
     command = [
         esbmc,
         str(safe_repo_path(root, capsule.harness)),
         "--function",
         capsule.entry_function,
         "--timeout",
-        f"{capsule.timeout_seconds}s",
+        f"{timeout_seconds}s",
         "--show-stacktrace",
     ]
     command.extend(f"-I{safe_repo_path(root, path)}" for path in capsule.include_dirs)
@@ -105,7 +107,7 @@ def verify_capsule(
                 check=False,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
-                timeout=capsule.timeout_seconds + 10,
+                timeout=(capsule.nightly_timeout_seconds if mode == "nightly" else capsule.timeout_seconds) + 10,
                 env=sanitized_subprocess_environment(),
             )
             output = process.stdout.decode("utf-8", errors="replace")
@@ -366,6 +368,16 @@ def _plan_execution(item: dict, mode: str) -> dict:
     timeout = execution.get("timeout_seconds", 120)
     if not isinstance(timeout, int) or timeout <= 0 or timeout > 3600:
         raise ManifestError("execution.timeout_seconds is invalid")
+    pr_timeout = execution.get("pr_timeout_seconds", timeout)
+    nightly_timeout = execution.get("nightly_timeout_seconds", timeout)
+    if (
+        not isinstance(pr_timeout, int)
+        or not isinstance(nightly_timeout, int)
+        or pr_timeout <= 0
+        or nightly_timeout < pr_timeout
+        or nightly_timeout > 3600
+    ):
+        raise ManifestError("execution nightly/pr timeout settings are invalid")
     native_test = execution.get("native_test")
     if native_test is not None and not isinstance(native_test, str):
         raise ManifestError("execution.native_test must be a string or null")
@@ -385,7 +397,12 @@ def _plan_execution(item: dict, mode: str) -> dict:
     nightly_esbmc_args = _plan_string_list(execution, "nightly_esbmc_args")
     expected_defines = nightly_defines if mode == "nightly" else pr_defines
     expected_args = nightly_esbmc_args if mode == "nightly" else pr_esbmc_args
-    if defines != expected_defines or esbmc_args != expected_args:
+    expected_timeout = nightly_timeout if mode == "nightly" else pr_timeout
+    if (
+        defines != expected_defines
+        or esbmc_args != expected_args
+        or timeout != expected_timeout
+    ):
         raise ManifestError(f"{item['id']}: materialized execution settings do not match mode")
     return {
         "policy": policy,
@@ -393,6 +410,8 @@ def _plan_execution(item: dict, mode: str) -> dict:
         "entry_function": entry_function,
         "include_dirs": includes,
         "timeout_seconds": timeout,
+        "pr_timeout_seconds": pr_timeout,
+        "nightly_timeout_seconds": nightly_timeout,
         "defines": defines,
         "esbmc_args": esbmc_args,
         "mutable_paths": _plan_repo_paths(execution, "mutable_paths"),

@@ -76,6 +76,12 @@ reported as verified. A declared base-approved native regression is part of
 the deterministic result: compilation failure is inconclusive and a failing
 regression is a counterexample.
 
+Registry targets may declare `nightly_timeout_seconds` separately from
+`timeout_seconds`. The nightly value is used only for authenticated nightly
+mode and must be greater than or equal to the PR timeout; omitting it preserves
+the PR timeout in every mode. This prevents a wider nightly proof from
+silently weakening the per-PR gate.
+
 Generated plans also contain a bounded `drift` record with the exact merge
 base, normalized Git change inventory, submodule pointers, structural
 relations, and proposed-policy delta. The verifier recomputes that record on a

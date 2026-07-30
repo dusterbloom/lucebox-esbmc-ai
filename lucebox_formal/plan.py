@@ -165,6 +165,13 @@ def load_registry(path: str, contents: str) -> ContractRegistry:
         timeout = raw.get("timeout_seconds", 120)
         if not isinstance(timeout, int) or timeout <= 0 or timeout > 3600:
             raise PlanError(f"{target_id}: invalid timeout_seconds")
+        nightly_timeout = raw.get("nightly_timeout_seconds", timeout)
+        if (
+            not isinstance(nightly_timeout, int)
+            or nightly_timeout < timeout
+            or nightly_timeout > 3600
+        ):
+            raise PlanError(f"{target_id}: invalid nightly_timeout_seconds")
         source_paths = _paths(raw, "source_paths", required=True)
         if not source_paths:
             raise PlanError(f"{target_id}: source_paths must not be empty")
@@ -193,6 +200,7 @@ def load_registry(path: str, contents: str) -> ContractRegistry:
                 entry_function=str(raw.get("entry_function", "main")),
                 include_dirs=_paths(raw, "include_dirs"),
                 timeout_seconds=timeout,
+                nightly_timeout_seconds=nightly_timeout,
                 pr_defines=_string_list(raw, "pr_defines"),
                 nightly_defines=_string_list(raw, "nightly_defines"),
                 pr_esbmc_args=_string_list(raw, "pr_esbmc_args"),
@@ -356,7 +364,9 @@ def _execution(target: RegistryTarget, mode: str) -> dict[str, Any]:
         "description": target.description,
         "entry_function": target.entry_function,
         "include_dirs": list(target.include_dirs),
-        "timeout_seconds": target.timeout_seconds,
+        "timeout_seconds": target.nightly_timeout_seconds if nightly else target.timeout_seconds,
+        "pr_timeout_seconds": target.timeout_seconds,
+        "nightly_timeout_seconds": target.nightly_timeout_seconds,
         "defines": list(target.nightly_defines if nightly else target.pr_defines),
         "pr_defines": list(target.pr_defines),
         "nightly_defines": list(target.nightly_defines),

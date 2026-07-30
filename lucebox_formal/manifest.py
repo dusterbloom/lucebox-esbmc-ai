@@ -65,6 +65,13 @@ def load_manifest(path: Path) -> Manifest:
         timeout = raw.get("timeout_seconds", 120)
         if not isinstance(timeout, int) or timeout <= 0 or timeout > 3600:
             raise ManifestError(f"{capsule_id}: invalid timeout_seconds")
+        nightly_timeout = raw.get("nightly_timeout_seconds", timeout)
+        if (
+            not isinstance(nightly_timeout, int)
+            or nightly_timeout < timeout
+            or nightly_timeout > 3600
+        ):
+            raise ManifestError(f"{capsule_id}: invalid nightly_timeout_seconds")
         capsules.append(
             Capsule(
                 id=capsule_id,
@@ -73,6 +80,7 @@ def load_manifest(path: Path) -> Manifest:
                 entry_function=str(raw.get("entry_function", "main")),
                 include_dirs=_repo_paths(raw, "include_dirs"),
                 timeout_seconds=timeout,
+                nightly_timeout_seconds=nightly_timeout,
                 defines=_string_tuple(raw, "defines"),
                 nightly_defines=_string_tuple(raw, "nightly_defines"),
                 esbmc_args=_string_tuple(raw, "esbmc_args"),
