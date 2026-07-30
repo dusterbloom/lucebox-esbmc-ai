@@ -54,7 +54,11 @@ CUDA kernel merely because it is important. Extract and prove the host-side
 transition, ownership, indexing, and bounds decisions. Retain native and GPU
 tests for numerical parity, serialization, external I/O, and device behavior.
 
-## Current promoted coverage
+## Current base-registered required targets
+
+Registry policy and promotion into GitHub branch protection are separate
+states. These targets are registered as required in the pilot base policy;
+repository leadership still controls whether the check itself is mandatory.
 
 ### `prefix-cache-inline`
 
@@ -83,7 +87,7 @@ The checked-in mutation changes only the `prepare()` call site while leaving
 the selector correct. A healthy pipeline must keep the selector target
 verified and report a counterexample from the base-native regression.
 
-## Required targeted PR contracts
+## Candidate targeted PR contracts
 
 These contracts should be required when their registered production or
 contract paths change. They should not run on unrelated pull requests.
@@ -115,11 +119,16 @@ Primary paths:
 
 ### 2. `prefix-cache-full-lifecycle`
 
+Current status: staged in the Lucebox pilot registry as advisory. Local
+PR-bound ESBMC evidence exists, but promotion still requires checked-in
+mutation evidence and publication and acceptance of the companion image that
+authenticates transitive contract snapshots.
+
 The full-compress cache currently keeps a second reservation and eviction
 state machine inside `PrefixCache`; it deserves a verification-friendly
 production core analogous to `InlinePrefixCacheState`.
 
-Properties:
+Target portfolio properties:
 
 - full-cache slots stay in `[full_slot_base, full_slot_base + full_cap)`;
 - no full-cache reservation can claim the disk staging slot
@@ -135,7 +144,17 @@ Properties:
   entry;
 - the atomic in-use mirror equals the abstract entry count.
 
-Primary paths:
+The current model-checked scope is the fresh
+prepare/invalid-confirm/confirm/lookup/clear trace. Concrete abort, hole reuse,
+LRU, and victim sequences are exact-head native regressions. Adapter
+orchestration and the atomic size mirror are excluded from the current formal
+capsule.
+
+Primary formal boundary:
+
+- `server/src/server/prefix_cache_state.h::FullPrefixCacheState`
+
+Integration triggers:
 
 - `server/src/server/prefix_cache.h`
 - `server/src/server/prefix_cache.cpp`
@@ -166,6 +185,10 @@ Primary path:
 `server/src/server/http_server.cpp`.
 
 ### 4. `spec-commit-exactness`
+
+Current status: staged in the Lucebox pilot registry as advisory. The
+first capsule covers the shared acceptance/bonus/budget/token-selection core;
+rollback, EOS, and emission orchestration remain explicitly out of scope.
 
 This is the highest-priority new core. Closely related acceptance, bonus,
 generation-budget, rollback, and emission logic is currently repeated across
@@ -220,17 +243,21 @@ Primary paths:
 
 ### 6. `kvflash-residency-map`
 
+Current status: staged in the Lucebox pilot registry as advisory. The
+production pager now delegates ownership to the CPU-only map; GPU byte movement
+remains outside the capsule.
+
 Model the pager with small chunks and a storage-free backend. GPU byte movement
 remains covered by native/GPU parity tests.
 
-Properties:
+Target portfolio properties:
 
 - resident logical chunks and physical blocks form a partial bijection;
 - free and resident block counts sum to the configured pool;
 - `slot_for` and `slot_of` agree for every resident logical position;
 - sink chunks and the protected tail window are not selected as victims;
 - failed allocation restores the previous append-head cursor;
-- page-out frees exactly one block and preserves an abstract host-backed copy;
+- page-out frees exactly one block and marks the logical chunk host-backed;
 - page-in consumes one free block and restores residency;
 - reset removes all mappings, advances the epoch, and restores the full free
   set;
@@ -239,7 +266,15 @@ Properties:
   materialized in identity blocks;
 - slot-position and slot-validity masks agree with the residency map.
 
-Primary path:
+The current model-checked sequences cover identity fill, rejected callback
+rollback, one protected-LRU eviction, masks, and the logical bound. Recall,
+explicit page-out, reset, scored selection, and wider offsets are exact-head
+native regressions. Neither lane claims host-storage byte identity.
+
+Primary formal boundary:
+`server/src/common/kvflash_residency_map.h::KvFlashResidencyMap`.
+
+Adapter trigger outside the proof:
 `server/src/common/kvflash_pager.h`.
 
 ### 7. `ipc-payload-sequence-safety`
@@ -433,7 +468,10 @@ Each promoted target should contain all of the following:
 
 ## Rollout order
 
-The recommended order after the two current prefix-cache targets is:
+The first wave is staged as advisory targets and has local PR-bound ESBMC
+evidence. Promotion still depends on checked-in mutation evidence and an
+accepted companion image containing the contract-snapshot trust fix. The
+portfolio order is:
 
 1. `spec-commit-exactness`
 2. `kvflash-residency-map`

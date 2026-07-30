@@ -56,12 +56,14 @@ repository owns the policy parser, planner, verifier, drift classifier, and
 advisory AI machinery. It must not own a parallel model of Lucebox production
 behavior.
 
-## What exists today
+## Implemented in branch source
 
-The current implementation already:
+The current branch source:
 
 - reads policy, templates, and immutable contract content from the exact
   protected `base_sha`;
+- materializes authenticated contract snapshots ahead of head include paths,
+  while allowing undeclared production headers to resolve from `head_sha`;
 - checks out and authenticates the exact `head_sha`;
 - records hashes for generated harnesses and selected contract snapshots;
 - runs old base-approved targets when a PR changes the registry, because the
@@ -73,6 +75,10 @@ The current implementation already:
 - reports unmatched registered critical paths as `coverage_gap`;
 - keeps coverage gaps advisory in schema v1;
 - runs required contracts on push to `main` and in the nightly lane.
+
+These behaviors become the deployed trust base only after companion images
+containing this source are published and their digests are accepted
+consistently by Lucebox policy and every formal workflow.
 
 The important gaps are:
 

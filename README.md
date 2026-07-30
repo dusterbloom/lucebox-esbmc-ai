@@ -7,6 +7,11 @@ The integration makes one narrow promise: production code at an exact PR
 revision satisfies the bounded contracts approved at the exact target-branch
 revision recorded in the plan. It does not claim whole-program correctness.
 
+The trust behavior described below is implemented in the current companion
+source. It is not part of Lucebox's accepted CI trust base until images
+containing this source are published and their immutable digests are reviewed
+into Lucebox policy and workflows.
+
 The proposed Lucebox coverage portfolio, exact contract properties, rollout
 order, and non-goals are recorded in
 [`docs/lucebox-contract-portfolio.md`](docs/lucebox-contract-portfolio.md).
@@ -21,9 +26,12 @@ The synchronization and drift-control design is recorded in
   renders deterministic C++ harnesses.
 - `verify` authenticates the plan, base policy, templates, contract snapshots,
   drift evidence, generated harnesses, and head checkout before invoking ESBMC
-  without network access or credentials. When a target declares a native
-  regression, it compiles the immutable base snapshot against the exact head
-  sources and runs it inside the same constrained container.
+  without network access or credentials. Authenticated contract-path snapshots
+  are materialized into an isolated include tree ahead of head include paths,
+  so a transitive harness body cannot be weakened by the PR. When a target
+  declares a native regression, the verifier compiles its immutable base
+  snapshot against the exact head sources and runs it inside the same
+  constrained container.
 - `propose` and `validate` form the advisory repair lane. The credential-bearing
   proposer never executes candidate code; a second secretless container applies
   and reverifies it against the exact immutable failure bundle.

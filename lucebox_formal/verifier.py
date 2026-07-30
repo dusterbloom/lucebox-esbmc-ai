@@ -624,25 +624,51 @@ def _verify_plan_item(
     output_dir: Path,
 ) -> CapsuleResult:
     defines = execution["defines"]
-    command = [
-        esbmc,
-        str(harness),
-        "--function",
-        execution["entry_function"],
-        "--timeout",
-        f"{execution['timeout_seconds']}s",
-        "--show-stacktrace",
-    ]
-    command.extend(f"-I{safe_repo_path(workspace, path)}" for path in execution["include_dirs"])
-    command.extend(f"-D{define}" for define in defines)
-    command.extend(execution["esbmc_args"])
-    if "--generate-html-report" not in execution["esbmc_args"]:
-        command.append("--generate-html-report")
-
     started = time.monotonic()
     artifacts: dict[str, list[str]] = {}
     with tempfile.TemporaryDirectory(prefix=f".{item['id']}-", dir=output_dir) as report_temp:
         report_workdir = Path(report_temp)
+        snapshot_root = report_workdir / "base-contracts"
+        snapshot_include_dirs = [snapshot_root / "repository"]
+        for index, _ in enumerate(execution["include_dirs"]):
+            snapshot_include_dirs.append(snapshot_root / "includes" / str(index))
+        for contract in item["provenance"]["contract_paths"]:
+            content = contract["content"].encode("utf-8")
+            relative = contract["path"]
+            destinations = [safe_repo_path(snapshot_include_dirs[0], relative)]
+            contract_path = PurePosixPath(relative)
+            for index, include_dir in enumerate(execution["include_dirs"]):
+                try:
+                    include_relative = contract_path.relative_to(PurePosixPath(include_dir))
+                except ValueError:
+                    continue
+                destinations.append(
+                    safe_repo_path(
+                        snapshot_include_dirs[index + 1],
+                        include_relative.as_posix(),
+                    )
+                )
+            for destination in destinations:
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                destination.write_bytes(content)
+
+        command = [
+            esbmc,
+            str(harness),
+            "--function",
+            execution["entry_function"],
+            "--timeout",
+            f"{execution['timeout_seconds']}s",
+            "--show-stacktrace",
+        ]
+        command.extend(f"-I{path}" for path in snapshot_include_dirs)
+        command.extend(
+            f"-I{safe_repo_path(workspace, path)}" for path in execution["include_dirs"]
+        )
+        command.extend(f"-D{define}" for define in defines)
+        command.extend(execution["esbmc_args"])
+        if "--generate-html-report" not in execution["esbmc_args"]:
+            command.append("--generate-html-report")
         try:
             process = subprocess.run(
                 command,

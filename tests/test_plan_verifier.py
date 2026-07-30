@@ -387,6 +387,128 @@ diff --git a/server/src/state.h b/server/src/state.h
                 (root / "server/test/test_state.cpp").read_bytes(),
             )
 
+    def test_esbmc_uses_base_transitive_contract_with_head_production_headers(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            original_base, _ = self._workspace(root)
+            self._git(root, "checkout", "-q", original_base)
+            registry = REGISTRY.replace(
+                'include_dirs = ["server/src"]',
+                'include_dirs = ["server/test", "server/src"]',
+            ).replace(
+                '  "server/test/test_state.cpp",\n',
+                '  "server/test/state_contract.h",\n'
+                '  "server/test/state_contract_body.inc",\n',
+            ).replace(
+                'native_test = "test_state"\n'
+                'native_test_source = "server/test/test_state.cpp"\n',
+                "",
+            )
+            (root / "formal/contracts/registry.toml").write_text(
+                registry, encoding="utf-8"
+            )
+            (root / "formal/contracts/state.cpp.in").write_text(
+                '#include "state_contract.h"\n'
+                "int verify_state() { return contract_expectation == production_value; }\n",
+                encoding="utf-8",
+            )
+            (root / "server/src/state.h").write_text(
+                "#pragma once\n#define PRODUCTION_VALUE 1\n",
+                encoding="utf-8",
+            )
+            (root / "server/test/state_contract.h").write_text(
+                '#include "state.h"\n'
+                '#include "state_contract_body.inc"\n'
+                "int contract_expectation = CONTRACT_EXPECTATION;\n"
+                "int production_value = PRODUCTION_VALUE;\n",
+                encoding="utf-8",
+            )
+            (root / "server/test/state_contract_body.inc").write_text(
+                "#define CONTRACT_EXPECTATION 1\n",
+                encoding="utf-8",
+            )
+            self._git(root, "add", ".")
+            self._git(root, "commit", "-qm", "add transitive base contract")
+            base = self._git(root, "rev-parse", "HEAD")
+
+            (root / "server/test/state_contract_body.inc").write_text(
+                "#define CONTRACT_EXPECTATION 7\n",
+                encoding="utf-8",
+            )
+            (root / "server/src/state.h").write_text(
+                "#pragma once\n#define PRODUCTION_VALUE 7\n",
+                encoding="utf-8",
+            )
+            self._git(
+                root,
+                "add",
+                "server/test/state_contract_body.inc",
+                "server/src/state.h",
+            )
+            self._git(root, "commit", "-qm", "weaken head contract and change production")
+            head = self._git(root, "rev-parse", "HEAD")
+
+            fake = root / "preprocessing-esbmc"
+            fake.write_text(
+                """#!/usr/bin/env python3
+import subprocess
+import sys
+
+if sys.argv[1:] == ["--version"]:
+    print("ESBMC version 8.4.0")
+    raise SystemExit(0)
+
+harness = sys.argv[1]
+includes = [argument for argument in sys.argv[2:] if argument.startswith("-I")]
+process = subprocess.run(
+    ["c++", "-E", harness, *includes],
+    check=False,
+    text=True,
+    stdout=subprocess.PIPE,
+    stderr=subprocess.STDOUT,
+)
+if (
+    process.returncode == 0
+    and "contract_expectation = 1" in process.stdout
+    and "production_value = 7" in process.stdout
+):
+    print("VERIFICATION FAILED")
+    raise SystemExit(1)
+if (
+    process.returncode == 0
+    and "contract_expectation = 7" in process.stdout
+    and "production_value = 7" in process.stdout
+):
+    print("VERIFICATION SUCCESSFUL")
+    raise SystemExit(0)
+print(process.stdout)
+print("preprocessing failed")
+raise SystemExit(1)
+""",
+                encoding="utf-8",
+            )
+            fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
+            plan = self._plan(root, base, head)
+            output = root / "snapshot-contract"
+            with patch.dict(os.environ, {"ESBMC_PATH": str(fake)}):
+                code = run_verify_plan(root, plan, plan.parent, output)
+
+            self.assertEqual(code, 10)
+            report = json.loads((output / "report.json").read_text(encoding="utf-8"))
+            self.assertEqual(report["conclusion"], "counterexample")
+            result = next(item for item in report["results"] if item["id"] == "state-contract")
+            self.assertEqual(result["status"], "counterexample")
+            include_arguments = [
+                argument for argument in result["command"] if argument.startswith("-I")
+            ]
+            self.assertIn("base-contracts", include_arguments[0])
+            self.assertEqual(
+                include_arguments[-2:],
+                [f"-I{root / 'server/test'}", f"-I{root / 'server/src'}"],
+            )
+
 
 if __name__ == "__main__":
     unittest.main()
