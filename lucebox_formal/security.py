@@ -6,9 +6,12 @@ import shutil
 import tarfile
 from pathlib import Path, PurePosixPath
 
-
-MAX_MEMBER_BYTES = 1_000_000
-MAX_BUNDLE_BYTES = 4_000_000
+# A schema-v1 plan may contain up to 8 MiB of immutable contract snapshots.
+# Plan failure bundles intentionally preserve that JSON plus exact extracted
+# contract files, so validation needs bounded headroom for the duplicated
+# replay material.
+MAX_MEMBER_BYTES = 12_000_000
+MAX_BUNDLE_BYTES = 32_000_000
 
 
 class BundleError(ValueError):

@@ -25,7 +25,7 @@ LABEL org.opencontainers.image.source="https://github.com/dusterbloom/lucebox-es
 LABEL org.opencontainers.image.licenses="AGPL-3.0-or-later"
 RUN apt-get update \
     && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-        ca-certificates git libc6-dev python3-minimal python3-venv \
+        ca-certificates g++ git libc6-dev python3-minimal python3-venv \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=esbmc-fetch /opt/esbmc/bin/esbmc /usr/local/bin/esbmc
 COPY --from=esbmc-fetch /opt/esbmc/license /usr/share/licenses/esbmc
@@ -40,11 +40,7 @@ RUN /opt/venv/bin/pip install --no-cache-dir /opt/lucebox-esbmc-ai-src \
 
 FROM runtime AS repair-dependencies
 ARG ESBMC_AI_COMMIT=982f3ae0328e4b8906c3264b00e6541cd93356d8
-RUN apt-get update \
-    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-        g++ \
-    && rm -rf /var/lib/apt/lists/* \
-    && /opt/venv/bin/pip install --no-cache-dir \
+RUN /opt/venv/bin/pip install --no-cache-dir \
         torch --index-url https://download.pytorch.org/whl/cpu \
     && /opt/venv/bin/pip install --no-cache-dir \
         "git+https://github.com/esbmc/esbmc-ai.git@${ESBMC_AI_COMMIT}"

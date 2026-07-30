@@ -1,72 +1,130 @@
 # Lucebox ESBMC-AI companion
 
-This repository supplies the isolated formal-verification and bounded,
-approval-only repair lane used by the `dusterbloom/lucebox-hub` pilot.
+This repository supplies the isolated planner, verifier, and advisory AI lanes
+used by the `dusterbloom/lucebox-hub` formal-verification pilot.
 
-The integration makes one narrow promise: when a declared verification capsule
-passes, the checked production transition code satisfies the properties and
-bounds recorded by that capsule. It does not claim whole-program correctness.
+The integration makes one narrow promise: production code at an exact PR
+revision satisfies the bounded contracts approved at the exact target-branch
+revision recorded in the plan. It does not claim whole-program correctness.
 
-## Two trust lanes
+The trust behavior described below is implemented in the current companion
+source. It is not part of Lucebox's accepted CI trust base until images
+containing this source are published and their immutable digests are reviewed
+into Lucebox policy and workflows.
 
-- `verifier` contains ESBMC and this deterministic adapter. It has no LLM
-  dependencies, receives the Lucebox checkout read-only, and runs without
-  network access.
-- `repair` additionally contains ESBMC-AI and a compiler. The workflow invokes
-  it twice in separate ephemeral containers: `propose` has the model credential
-  but never executes candidate code; `validate` has no credential or network
-  and is the only process allowed to apply, compile, run, and reverify a patch.
-  It emits an accepted patch only after the immutable formal contract and native
-  test pass again.
+The proposed Lucebox coverage portfolio, exact contract properties, rollout
+order, and non-goals are recorded in
+[`docs/lucebox-contract-portfolio.md`](docs/lucebox-contract-portfolio.md).
+The synchronization and drift-control design is recorded in
+[`docs/drift-sentinel-design.md`](docs/drift-sentinel-design.md).
 
-Neither process pushes, comments, commits, or opens pull requests. The repair
-lane is advisory; a human must inspect and apply any accepted candidate.
+## Trust lanes
+
+- `plan` reads the registry and templates from an exact base Git commit,
+  inventories add/modify/delete/rename/copy and submodule changes, classifies
+  protected-boundary and bounded include adjacency, selects targets, and
+  renders deterministic C++ harnesses.
+- `verify` authenticates the plan, base policy, templates, contract snapshots,
+  drift evidence, generated harnesses, and head checkout before invoking ESBMC
+  without network access or credentials. Authenticated contract-path snapshots
+  are materialized into an isolated include tree ahead of head include paths,
+  so a transitive harness body cannot be weakened by the PR. When a target
+  declares a native regression, the verifier compiles its immutable base
+  snapshot against the exact head sources and runs it inside the same
+  constrained container.
+- `propose` and `validate` form the advisory repair lane. The credential-bearing
+  proposer never executes candidate code; a second secretless container applies
+  and reverifies it against the exact immutable failure bundle.
+- `propose-contract` and `validate-contract` perform the equivalent split for a
+  critical change that has no approved contract. A validated proposal remains
+  advisory and cannot satisfy the required proof result.
+
+Neither image commits, comments, pushes, opens pull requests, or changes a
+contract registry.
+
+## Plan and verification
+
+Create a plan from base-approved policy:
+
+```bash
+lucebox-formal plan \
+  --workspace /workspace \
+  --base-policy formal/contracts/registry.toml \
+  --base-sha "$BASE_SHA" \
+  --head-sha "$HEAD_SHA" \
+  --mode pr \
+  --out /plan
+```
+
+Verify that exact plan:
+
+```bash
+lucebox-formal verify \
+  --workspace /workspace \
+  --plan /plan/plan.json \
+  --generated-root /plan \
+  --out /results
+```
+
+Legacy `verify --manifest ...` remains supported during the dual-run migration.
+
+Plan verification produces JSON, JUnit, Markdown, native ESBMC HTML reports,
+and bounded evidence bundles. Its machine conclusions are `verified`,
+`counterexample`, `invalid_contract`, `inconclusive`, `coverage_gap`, and
+`not_applicable`. Coverage gaps are advisory in schema v1; they are never
+reported as verified. A declared base-approved native regression is part of
+the deterministic result: compilation failure is inconclusive and a failing
+regression is a counterexample.
+
+Registry targets may declare `nightly_timeout_seconds` separately from
+`timeout_seconds`. The nightly value is used only for authenticated nightly
+mode and must be greater than or equal to the PR timeout; omitting it preserves
+the PR timeout in every mode. This prevents a wider nightly proof from
+silently weakening the per-PR gate.
+
+Generated plans also contain a bounded `drift` record with the exact merge
+base, normalized Git change inventory, submodule pointers, structural
+relations, and proposed-policy delta. The verifier recomputes that record on a
+Git checkout. Removing or renaming a protected boundary, weakening protected
+policy, or supplying malformed/tampered drift evidence fails as
+`invalid_contract`; watch and include-adjacency gaps remain advisory.
+
+## Advisory AI configuration
+
+The GitHub integration uses an approval-protected environment named
+`formal-ai`. For Z.AI’s OpenAI-compatible API, configure:
+
+```text
+Environment secret:
+  ZAI_API_KEY=<your key>
+
+Environment variables:
+  FORMAL_AI_MODEL=openai:glm-5
+  FORMAL_AI_BASE_URL=https://api.z.ai/api/paas/v4/
+```
+
+The workflow maps `ZAI_API_KEY` to the OpenAI-compatible client only inside the
+credential-bearing proposal step. Z.AI documents the general compatible base
+URL and `glm-5` model in its
+[GLM-5 guide](https://docs.z.ai/guides/llm/glm-5). A coding-plan subscription
+may instead require the dedicated coding endpoint documented by Z.AI; set
+`FORMAL_AI_BASE_URL` explicitly rather than changing repository code.
+
+OpenAI can be used by storing `OPENAI_API_KEY`, setting the appropriate base URL,
+and selecting an `openai:<model>` value. Fork PRs never reach a credentialed
+job automatically.
 
 ## Exit codes
 
 | Code | Meaning |
 |---:|---|
-| 0 | Capsules passed, a proposal was produced, or a candidate reverified |
+| 0 | Required contracts verified, no contract applied, or advisory gap/proposal completed |
 | 10 | At least one ESBMC counterexample |
-| 11 | At least one capsule timed out |
-| 12 | ESBMC or its frontend failed |
-| 13 | Invalid manifest |
-| 20 | No repair candidate passed the immutable contract |
-| 21 | Unsafe or invalid failure bundle/patch |
-
-## Local verifier use
-
-```bash
-lucebox-formal verify \
-  --manifest /workspace/formal/manifest.toml \
-  --mode all \
-  --out /results
-```
-
-The Lucebox repository wraps the container invocation in `scripts/formal.sh`.
-Image references live in `formal/manifest.toml` and are pinned by digest after
-publication. Every selected C/C++ capsule asks ESBMC for its native,
-self-contained HTML report. Counterexamples publish those reports below
-`counterexamples/<capsule>/` alongside the JSON, JUnit, Markdown, and immutable
-repair-bundle artifacts.
-
-## Repair input and secrets
-
-`lucebox-formal propose` accepts a verifier-generated
-`failure-bundle-*.tar.gz` and writes an untrusted proposal. In a new container,
-`lucebox-formal validate` accepts that bundle and patch and writes
-`candidate.patch` only on success. When a candidate still violates the formal
-contract, validation preserves the native HTML counterexample below its own
-`counterexamples/` output directory.
-
-The GitHub workflow is designed for an environment named `formal-ai`; store
-`OPENAI_API_KEY` there and require reviewers before the proposer may run. The
-model is configurable with `FORMAL_AI_MODEL`.
-
-The workflow never runs on fork content with a secret. It is triggered only for
-same-repository counterexamples, does not check out the failed revision, and
-validates every archive and patch path before use. The validator runs with
-`--network none` after the credential-bearing proposer container has exited.
+| 11 | Verification was inconclusive |
+| 12 | Legacy verifier/frontend error |
+| 13 | Invalid manifest, plan, contract, or provenance |
+| 20 | No advisory repair or contract proposal passed secretless validation |
+| 21 | Unsafe or invalid evidence bundle, proposal, or patch |
 
 ## Development
 
@@ -78,5 +136,5 @@ python3 -m venv .venv
 .venv/bin/python -m unittest discover -s tests -v
 ```
 
-The adapter is licensed under AGPL-3.0-or-later. ESBMC and ESBMC-AI retain
-their own licenses; their notices are included in the published images.
+The adapter is AGPL-3.0-or-later. ESBMC and ESBMC-AI retain their own licenses;
+their notices are included in published images.
